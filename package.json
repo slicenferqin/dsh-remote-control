@@ -1,0 +1,71 @@
+{
+  "name": "dsh-remote-control",
+  "version": "0.2.0",
+  "description": "Pair a phone browser with this DeepSeek Harness through a temporary HTTPS tunnel.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/slicenferqin/dsh-remote-control.git"
+  },
+  "homepage": "https://github.com/slicenferqin/dsh-remote-control#readme",
+  "bugs": {
+    "url": "https://github.com/slicenferqin/dsh-remote-control/issues"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "remote-control",
+    "tunnel"
+  ],
+  "packageManager": "pnpm@11.9.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19",
+    "dsh": ">=0.2.1-rc.2 <0.3.0"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "build-client.js",
+    "src",
+    "cordis.patch.yml",
+    "locale",
+    "icon.svg",
+    "test",
+    "scripts",
+    "README.md",
+    "LICENSE",
+    "README.zh-CN.md"
+  ],
+  "scripts": {
+    "build": "node build-client.js",
+    "check": "node --check index.js && node --check client.js && node --check src/bridge.js && node --check src/tunnel.js && node --check src/controller.js && node --check src/renewal.js && node --check build-client.js && node --check scripts/verify-package.mjs",
+    "test": "node --test test/*.test.js",
+    "verify:package": "node scripts/verify-package.mjs"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "http-proxy": "^1.18.1",
+    "qrcode": "^1.5.4"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  }
+}

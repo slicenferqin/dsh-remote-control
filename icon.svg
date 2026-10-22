@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" fill="none">
+  <title>Remote control</title>
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="#176B5C"/>
+  <rect x="20" y="30" width="65" height="47" rx="7" stroke="#F4FFF9" stroke-width="6"/>
+  <path d="M41 92h22M52 79v13" stroke="#F4FFF9" stroke-width="6" stroke-linecap="round"/>
+  <rect x="76" y="57" width="29" height="44" rx="7" fill="#176B5C" stroke="#F4FFF9" stroke-width="6"/>
+  <path d="M87 91h7" stroke="#A7EDCD" stroke-width="4" stroke-linecap="round"/>
+  <path d="M93 28c8 2 14 8 16 16M92 39c3 1 5 3 6 6" stroke="#A7EDCD" stroke-width="5" stroke-linecap="round"/>
+  <path d="m38 52 7 7 14-14" stroke="#A7EDCD" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
