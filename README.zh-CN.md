@@ -49,7 +49,7 @@ winget install Cloudflare.cloudflared
 通过 GitHub tag 将社区发行版安装到 Web profile：
 
 ```sh
-dsh plugin --profile web add github:slicenferqin/dsh-remote-control#v0.2.0
+dsh plugin --profile web add github:slicenferqin/dsh-remote-control#v0.2.1
 ```
 
 如需完整手机体验，可在同一 profile 加装手机工作台：
@@ -70,6 +70,14 @@ dsh plugin --profile web add github:slicenferqin/dsh-mobile#v0.1.0
 6. 在电脑的远程控制设置中重命名或撤销设备。安装 dsh-mobile 后，已配对手机也可在 **设备** 中修改自己的名称。
 
 电脑需要保持唤醒、联网并持续运行 DSH。每增加一台设备请生成新二维码。配对链接默认两分钟有效，只能领取一次；生成新码会使未领取的旧码失效。
+
+## 添加工作区
+
+在桌面界面点击 **添加工作区**（`AddWorkspace`），目录选择器会出现在发起操作的当前浏览器中。它浏览的是运行 DSH Host 的电脑上的目录；远程浏览器也可在自己的页面中选择 Host 目录。
+
+只要该 profile 中启用了 dsh-remote-control bundle，本机浏览器也使用浏览器目录选择器，即使远程入口开关处于关闭状态。这是整个 profile 的设置，不取决于隧道何时启动。Core 的自动选择器会在启动时根据本机条件选定 backend，之后开启隧道不会改变该选择。
+
+bundle patch 依赖标准 Web profile 默认的 `directory-picker` 行：禁用该自动选择器，并显式加入 Core 的 browse Host 和 browse Client。定制 composition 需要确保只启用一个目录选择 backend，移除或禁用冲突的原生、自动选择器或重复 browse backend。
 
 ## 凭证与有效期
 

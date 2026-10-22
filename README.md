@@ -49,7 +49,7 @@ For other platforms, use the [official cloudflared releases](https://github.com/
 Install the tagged community release into the Web profile:
 
 ```sh
-dsh plugin --profile web add github:slicenferqin/dsh-remote-control#v0.2.0
+dsh plugin --profile web add github:slicenferqin/dsh-remote-control#v0.2.1
 ```
 
 For the full phone experience, optionally add the phone workspace to the same profile:
@@ -70,6 +70,14 @@ Start DSH with `dsh web` (or `dsh --profile web`). If it is already running, res
 6. Rename or revoke devices in the computer's Remote control settings. With dsh-mobile installed, a paired phone can also rename itself under **Device**.
 
 The computer must stay awake, online, and running DSH. Generate a new QR code for each additional device. Pairing links last two minutes by default and can be claimed once; generating a new code invalidates the previous unclaimed one.
+
+## Add a workspace
+
+In the desktop interface, **Add workspace** (`AddWorkspace`) opens a directory chooser in the browser where you clicked it. The chooser browses directories on the computer running the DSH Host. A remote browser therefore selects a Host directory from its own page.
+
+While the dsh-remote-control bundle is enabled in a profile, local browsers in that profile also use the browser chooser, including when the remote-access switch is off. This is a profile-wide setting, independent of when the tunnel starts. Core's automatic picker chooses its backend at startup from local conditions; starting a tunnel later does not change that choice.
+
+The bundle patch relies on the standard Web profile's default `directory-picker` row: it disables that automatic picker and explicitly adds Core's browse Host and browse Client. If you use a custom composition, ensure it has only one directory-picker backend active; remove or disable conflicting native, automatic, or duplicate browse backends.
 
 ## Credentials and session lifetime
 

@@ -1,4 +1,14 @@
+# Remote access can be enabled after boot, when the adaptive chooser has
+# already selected an OS dialog. Pin both sides of the browser interaction.
+- id: directory-picker
+  name: '@deepseek-ai/dsh-host-directory-picker-auto'
+  disabled: true
 - insert:
+    - id: dsh-remote-control-directory-picker
+      name: '@deepseek-ai/dsh-host-directory-picker-browse'
+      config: {}
+    - id: dsh-remote-control-directory-picker-ui
+      name: '@deepseek-ai/dsh-client-ui-directory-picker-browse'
     - id: dsh-remote-control
       name: dsh-remote-control
       config: {}

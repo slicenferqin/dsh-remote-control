@@ -1,6 +1,6 @@
 {
   "name": "dsh-remote-control",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Pair a phone browser with this DeepSeek Harness through a temporary HTTPS tunnel.",
   "license": "MIT",
   "repository": {
@@ -41,6 +41,7 @@
     "test",
     "scripts",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     "README.zh-CN.md"
   ],
