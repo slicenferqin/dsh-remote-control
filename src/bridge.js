@@ -2,6 +2,7 @@ import http from 'node:http'
 import https from 'node:https'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import httpProxy from 'http-proxy'
+import { createPairingResumer } from './pairing-resume.js'
 
 const PAIR_PATH = '/__dsh_remote_pair'
 const DEVICE_PATH = '/__dsh_remote_device'
@@ -172,8 +173,8 @@ function readBody(req) {
 function pairingPage() {
   const nonce = randomBytes(18).toString('base64')
   return {
-    csp: `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`,
-    html: `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>配对 DeepSeek Harness</title><style nonce="${nonce}">body{font:16px system-ui;max-width:28rem;margin:12vh auto;padding:1.5rem;line-height:1.6}input,button{box-sizing:border-box;width:100%;font:inherit;padding:.75rem;margin-top:.75rem}button{cursor:pointer}p{color:#555}</style><h1>配对此设备</h1><p>确认设备名称后，此设备可以访问你的 DeepSeek Harness。</p><form method="post" action="${PAIR_PATH}"><input type="hidden" name="secret" id="secret"><label>设备名称<input id="label" name="label" required minlength="1" maxlength="80" placeholder="例如：我的手机" autocomplete="off"></label><button id="pair" type="submit" disabled>配对并进入</button></form><p id="status" role="status">请使用电脑上生成的配对二维码打开此页面。</p><script nonce="${nonce}">
+    csp: `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`,
+    html: `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>配对 DeepSeek Harness</title><style nonce="${nonce}">body{font:16px system-ui;max-width:28rem;margin:12vh auto;padding:1.5rem;line-height:1.6}input,button{box-sizing:border-box;width:100%;font:inherit;padding:.75rem;margin-top:.75rem}button{cursor:pointer}p{color:#555}</style><h1 id="title">配对此设备</h1><p id="intro">确认设备名称后，此设备可以访问你的 DeepSeek Harness。</p><form method="post" action="${PAIR_PATH}"><input type="hidden" name="secret" id="secret"><label>设备名称<input id="label" name="label" required minlength="1" maxlength="80" placeholder="例如：我的手机" autocomplete="off"></label><button id="pair" type="submit" disabled>配对并进入</button></form><p id="status" role="status">请使用电脑上生成的配对二维码打开此页面。</p><button id="retry" type="button" hidden>重试恢复</button><p><a href="/">进入首页</a></p><script nonce="${nonce}">
 const secret = new URLSearchParams(location.hash.slice(1)).get('secret');
 history.replaceState(null, '', location.pathname);
 const form = document.querySelector('form');
@@ -196,6 +197,25 @@ if (secret) {
   document.getElementById('secret').value = secret;
   document.getElementById('pair').disabled = false;
   status.textContent = '确认设备名称后，点击“配对并进入”。';
+} else {
+  form.hidden = true;
+  document.getElementById('title').textContent = '重新进入 DeepSeek Harness';
+  document.getElementById('intro').textContent = '正在检查此浏览器已有的配对凭证。';
+  const retry = document.getElementById('retry');
+  const resumer = (${createPairingResumer.toString()})({
+    fetch: (...args) => fetch(...args), location,
+    onState(next) {
+      retry.hidden = next.phase !== 'failed';
+      retry.disabled = next.phase === 'checking';
+      status.textContent = next.phase === 'checking' ? '正在恢复连接…'
+        : next.phase === 'ready' ? '连接已恢复，正在进入首页…'
+        : next.error === 'credentials_required' ? '当前浏览器未检测到有效配对凭证。请在电脑上生成新二维码，并在此浏览器中打开完成配对。'
+        : next.error === 'request_timeout' ? '恢复连接超时。请检查网络后重试，或返回首页；若仍无法进入，请使用电脑上生成的新二维码。'
+        : '暂时无法恢复连接。请重试或返回首页；若仍无法进入，请使用电脑上生成的新二维码。';
+    },
+  });
+  retry.addEventListener('click', () => { void resumer.retry(); });
+  void resumer.start();
 }
 </script></html>`,
   }
@@ -670,7 +690,9 @@ export async function createRemoteBridge({
         return
       }
       if (path === REFRESH_PATH) { await refresh(req, res); return }
-      let device = authorize(req, true)
+      // Confirmation must prove Set-Cookie was applied, without falling back to refresh.
+      const confirming = path === DEVICE_PATH && req.method === 'GET' && req.headers['x-dsh-remote-confirm'] === '1'
+      let device = authorize(req, !confirming)
       if (!device) {
         const renewed = await refreshDevice(req)
         device = renewed.device

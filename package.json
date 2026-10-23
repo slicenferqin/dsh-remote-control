@@ -1,6 +1,6 @@
 {
   "name": "dsh-remote-control",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Pair a phone browser with this DeepSeek Harness through a temporary HTTPS tunnel.",
   "license": "MIT",
   "repository": {
@@ -48,7 +48,7 @@
   ],
   "scripts": {
     "build": "node build-client.js",
-    "check": "node --check index.js && node --check client.js && node --check src/bridge.js && node --check src/tunnel.js && node --check src/controller.js && node --check src/renewal.js && node --check build-client.js && node --check scripts/verify-package.mjs",
+    "check": "node --check index.js && node --check client.js && node --check src/bridge.js && node --check src/tunnel.js && node --check src/controller.js && node --check src/renewal.js && node --check src/pairing-resume.js && node --check build-client.js && node --check scripts/verify-package.mjs",
     "test": "node --test test/*.test.js",
     "verify:package": "node scripts/verify-package.mjs"
   },

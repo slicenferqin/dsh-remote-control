@@ -57,7 +57,7 @@ For other platforms, use the [official cloudflared releases](https://github.com/
 Install the tagged community release into the Web profile:
 
 ```sh
-dsh plugin --profile web add github:slicenferqin/dsh-remote-control#v0.2.1
+dsh plugin --profile web add github:slicenferqin/dsh-remote-control#v0.2.2
 ```
 
 For the full phone experience, optionally add the phone workspace to the same profile:
@@ -78,6 +78,12 @@ Start DSH with `dsh web` (or `dsh --profile web`). If it is already running, res
 6. Rename or revoke devices in the computer's Remote control settings. With dsh-mobile installed, a paired phone can also rename itself under **Device**.
 
 The computer must stay awake, online, and running DSH. Generate a new QR code for each additional device. Pairing links last two minutes by default and can be claimed once; generating a new code invalidates the previous unclaimed one.
+
+### Return from an already paired browser
+
+After pairing, save the remote homepage (`https://<temporary-domain>.trycloudflare.com/`) rather than the one-use pairing address. Since v0.2.2, reopening an old pairing page after its one-use secret has been cleared tries the browser's existing refresh credential, confirms access, and returns to the fixed homepage.
+
+Credentials stay in the browser that completed pairing. Another browser, a new private session, or cleared site data needs a new QR code. Recovery failures distinguish unavailable credentials from temporary network errors, with explicit retry and homepage controls instead of a redirect loop.
 
 ## Add a workspace
 

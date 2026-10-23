@@ -57,7 +57,7 @@ winget install Cloudflare.cloudflared
 通过 GitHub tag 将社区发行版安装到 Web profile：
 
 ```sh
-dsh plugin --profile web add github:slicenferqin/dsh-remote-control#v0.2.1
+dsh plugin --profile web add github:slicenferqin/dsh-remote-control#v0.2.2
 ```
 
 如需完整手机体验，可在同一 profile 加装手机工作台：
@@ -78,6 +78,12 @@ dsh plugin --profile web add github:slicenferqin/dsh-mobile#v0.1.0
 6. 在电脑的远程控制设置中重命名或撤销设备。安装 dsh-mobile 后，已配对手机也可在 **设备** 中修改自己的名称。
 
 电脑需要保持唤醒、联网并持续运行 DSH。每增加一台设备请生成新二维码。配对链接默认两分钟有效，只能领取一次；生成新码会使未领取的旧码失效。
+
+### 已配对设备再次进入
+
+首次配对成功后，请保存远程首页（`https://<临时域名>.trycloudflare.com/`），不要把一次性扫码地址当作日常入口。v0.2.2 起，重新打开已清除一次性码的旧配对页时，会尝试使用此浏览器已有的刷新凭证，确认连接后自动进入首页。
+
+凭证只保存在完成配对的浏览器 Cookie 中；换浏览器、使用另一个隐私会话或清除站点数据后，需要新的二维码。恢复失败时页面会区分凭证不可用与临时网络错误，提供重试和首页入口，不会无限跳转。
 
 ## 添加工作区
 

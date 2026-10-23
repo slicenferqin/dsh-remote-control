@@ -58,7 +58,7 @@ function redeem(bridge, pairing, label = 'My phone', extra = {}) {
   })
 }
 
-function pairingBrowser(html, pairing, userAgent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)') {
+function pairingBrowser(html, pairing, userAgent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)', options = {}) {
   let automaticSubmissions = 0
   const makeElement = () => ({
     value: '', disabled: true, textContent: '', validityMessage: '', listeners: {},
@@ -66,18 +66,25 @@ function pairingBrowser(html, pairing, userAgent = 'Mozilla/5.0 (iPhone; CPU iPh
     setCustomValidity(message) { this.validityMessage = message },
     reportValidity() { return !this.validityMessage },
   })
-  const elements = Object.fromEntries(['secret', 'label', 'pair', 'status'].map(id => [id, makeElement()]))
+  const elements = Object.fromEntries(['secret', 'label', 'pair', 'status', 'title', 'intro', 'retry'].map(id => [id, makeElement()]))
   const form = makeElement()
   form.requestSubmit = form.submit = () => { automaticSubmissions++ }
   const location = new URL(pairing.url)
   const replacements = []
+  const navigations = []
+  const requests = []
+  location.replace = path => { navigations.push(path); options.onNavigate?.(path) }
   runInNewContext(html.match(/<script nonce="[^"]+">([\s\S]*)<\/script>/)[1], {
-    URLSearchParams, location, navigator: { userAgent },
+    URLSearchParams, location, navigator: { userAgent }, AbortController, setTimeout, clearTimeout,
+    fetch: (path, settings) => {
+      requests.push({ path, settings })
+      return options.fetch ? options.fetch(path, settings) : Promise.resolve({ ok: false, status: 401 })
+    },
     history: { replaceState: (...args) => replacements.push(args) },
     document: { querySelector: () => form, getElementById: id => elements[id] },
   })
   return {
-    elements, replacements, get automaticSubmissions() { return automaticSubmissions },
+    elements, form, replacements, navigations, requests, get automaticSubmissions() { return automaticSubmissions },
     clickPair() {
       if (elements.pair.disabled) return false
       let prevented = false
@@ -258,6 +265,7 @@ test('GET previews do not consume a fragment secret; concurrent POST can redeem 
   assert.equal(preview.status, 200)
   assert.equal(preview.headers['set-cookie'], undefined)
   assert.match(preview.headers['content-security-policy'], /form-action 'self'/)
+  assert.match(preview.headers['content-security-policy'], /connect-src 'self'/)
   assert.equal(preview.body.includes(secret), false)
   assert.doesNotMatch(preview.body, /requestSubmit\(|\.submit\(/)
   assert.equal(preview.headers['referrer-policy'], 'same-origin')
@@ -296,6 +304,8 @@ test('pairing page waits for explicit submission and validates names before rede
   const preview = await request(bridge.origin, PAIR_PATH)
   const browser = pairingBrowser(preview.body, pairing)
   assert.equal(browser.automaticSubmissions, 0)
+  assert.equal(browser.requests.length, 0)
+  assert.deepEqual(browser.navigations, [])
   assert.equal(browser.elements.label.value, '我的 iPhone')
   assert.equal(browser.elements.secret.value, secretOf(pairing))
   assert.equal(browser.elements.pair.disabled, false)
@@ -328,6 +338,85 @@ test('pairing page waits for explicit submission and validates names before rede
   assert.equal(response.status, 303)
   assert.equal(state.exchanges, 1)
   assert.equal(bridge.snapshot().devices[0].label, 'My work phone')
+})
+
+test('reopening the pairing page restores an existing browser after access expiry without consuming a new QR', { timeout: 5000 }, async t => {
+  let time = Date.now()
+  const { bridge, state } = await fixture(t, { now: () => time })
+  let cookie = onlyCookie(await pair(bridge), REFRESH_GATE)
+  const deviceId = bridge.snapshot().devices[0].id
+  time += 8 * HOUR + 1
+  const pendingPair = bridge.pairing('/sessions/another')
+  const page = await request(bridge.origin, PAIR_PATH, { headers: { origin: undefined } })
+  let entered
+  const navigation = new Promise(resolve => { entered = resolve })
+  const browser = pairingBrowser(page.body, { url: `${PUBLIC}${PAIR_PATH}?return=https://untrusted.invalid/` }, 'iPhone', {
+    onNavigate: entered,
+    async fetch(path, settings) {
+      const result = await request(bridge.origin, path, { method: settings.method,
+        headers: { cookie, ...settings.headers }, body: settings.body })
+      if (result.headers['set-cookie']) cookie = cookieHeader(result)
+      return { ok: result.status >= 200 && result.status < 300, status: result.status,
+        json: async () => JSON.parse(result.body) }
+    },
+  })
+  assert.equal(browser.form.hidden, true)
+  assert.equal(browser.elements.pair.disabled, true)
+  assert.equal(await navigation, '/')
+  assert.deepEqual(browser.navigations, ['/'])
+  assert.deepEqual(browser.requests.map(({ path }) => path), [REFRESH_PATH, '/__dsh_remote_device'])
+  assert.equal(browser.automaticSubmissions, 0)
+  assert.equal(state.exchanges, 2)
+  assert.equal(bridge.snapshot().devices.length, 1)
+  assert.equal(bridge.snapshot().devices[0].id, deviceId)
+  assert.equal(bridge.snapshot().pairingExpiresAt, pendingPair.expiresAt)
+  assert.equal((await request(bridge.origin, '/', { headers: { cookie } })).status, 200)
+})
+
+test('pairing confirmation cannot use old refresh grace to hide rejected Set-Cookie', { timeout: 5000 }, async t => {
+  const { bridge, state } = await fixture(t)
+  const original = await pair(bridge)
+  const rotated = await refresh(bridge, original)
+  assert.equal(rotated.status, 200)
+  const confirmation = { 'x-dsh-remote-confirm': '1' }
+  for (const cookie of [undefined, original, onlyCookie(original, REFRESH_GATE)]) {
+    const rejected = await request(bridge.origin, '/__dsh_remote_device', { headers: { cookie, ...confirmation } })
+    assert.equal(rejected.status, 401)
+    assert.equal(rejected.headers['set-cookie'], undefined)
+  }
+  const accepted = await request(bridge.origin, '/__dsh_remote_device', {
+    headers: { cookie: cookieHeader(rotated), ...confirmation },
+  })
+  assert.equal(accepted.status, 200)
+  assert.equal(accepted.headers['set-cookie'], undefined)
+  assert.equal(state.exchanges, 2)
+  assert.equal((await request(bridge.origin, '/__dsh_remote_device', { headers: { cookie: original } })).status, 200)
+  assert.equal(state.exchanges, 2)
+})
+
+test('no-secret page shows fixed recovery errors and retries only on an explicit click', { timeout: 5000 }, async t => {
+  const { bridge } = await fixture(t)
+  const page = await request(bridge.origin, PAIR_PATH)
+  let status = 401
+  const browser = pairingBrowser(page.body, { url: `${PUBLIC}${PAIR_PATH}` }, 'iPhone', {
+    fetch: async () => ({ ok: false, status, json: async () => { throw new Error('private-fixture-error') } }),
+  })
+  const flush = async () => { for (let index = 0; index < 24; index++) await Promise.resolve() }
+  await flush()
+  assert.equal(browser.requests.length, 1)
+  assert.equal(browser.form.hidden, true)
+  assert.match(browser.elements.status.textContent, /当前浏览器未检测到有效配对凭证/)
+  assert.match(browser.elements.status.textContent, /新二维码/)
+  assert.equal(browser.elements.retry.hidden, false)
+  assert.equal(browser.elements.retry.disabled, false)
+  assert.deepEqual(browser.navigations, [])
+  status = 502
+  browser.elements.retry.listeners.click()
+  await flush()
+  assert.equal(browser.requests.length, 2)
+  assert.match(browser.elements.status.textContent, /暂时无法恢复连接/)
+  assert.doesNotMatch(browser.elements.status.textContent, /private-fixture-error/)
+  assert.deepEqual(browser.navigations, [])
 })
 
 test('server rejects missing, blank, long or control-character names without consuming a pairing secret', { timeout: 5000 }, async t => {
