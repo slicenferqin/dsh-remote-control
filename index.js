@@ -1,10 +1,20 @@
 import Schema from '@deepseek-ai/schemastery';
 import { RemoteControl, safeError } from './src/controller.js';
 import { RemoteControlError } from './src/tunnel.js';
+import { createDeviceStore, normalizeRemoteOrigin } from './src/device-store.js';
 
 export const name = 'dsh-remote-control';
 export const inject = ['webServer', 'connection', 'tools'];
 export const Config = Schema.object({
+  tunnelMode: Schema.union(['quick', 'ssh']).default('quick').description('Temporary Cloudflare entry or a fixed HTTPS entry carried by a restricted SSH reverse tunnel.'),
+  publicOrigin: Schema.string().default('').description('Fixed HTTPS origin for SSH mode, for example https://dsh.example.com.'),
+  sshPath: Schema.string().default('ssh'),
+  sshTarget: Schema.string().default('').description('SSH alias configured for the restricted relay account.'),
+  sshConfigPath: Schema.string().default('').description('Optional absolute OpenSSH configuration file; private keys remain in local files.'),
+  sshRemotePort: Schema.number().min(1024).max(65535).step(1).default(18380).description('Remote loopback-only port used by the server HTTPS proxy.'),
+  persistDevices: Schema.boolean().default(false).description('Persist device refresh grants across controlled plugin restarts.'),
+  deviceStorePath: Schema.string().default('').description('Absolute path to a private device-state file; required when persistDevices is enabled.'),
+  autoStart: Schema.boolean().default(false).description('Restore a previously enabled entry on startup; an explicit Off remains off.'),
   cloudflaredPath: Schema.string().default('cloudflared').description('cloudflared executable name or absolute path on this computer.'),
   tunnelProtocol: Schema.union(['http2', 'quic', 'auto']).default('http2').description('Transport from cloudflared to Cloudflare; HTTP/2 avoids depending on outbound UDP.'),
   startupTimeoutSeconds: Schema.number().min(10).max(180).step(1).default(60),
@@ -15,7 +25,7 @@ export const Config = Schema.object({
   refreshRetrySeconds: Schema.number().min(5).max(60).step(1).default(30).description('Retry delay after a temporary refresh transport failure.'),
   maxDevices: Schema.number().min(1).max(16).step(1).default(4),
   heartbeatSeconds: Schema.number().min(5).max(60).step(1).default(15),
-}).description('Temporary browser remote control. Remote access always starts switched off.');
+}).description('Browser remote control with temporary or fixed HTTPS entry. Starts off unless automatic restoration is explicitly configured.');
 
 /** Register the authenticated local control surface and an agent capability that cannot grant access. */
 export async function apply(ctx, config) {
@@ -25,8 +35,14 @@ export async function apply(ctx, config) {
   if (config.refreshAheadSeconds >= config.deviceTtlHours * 3600) {
     throw new Error('dsh-remote-control: refreshAheadSeconds must be shorter than deviceTtlHours * 3600.');
   }
+  if (config.tunnelMode === 'ssh') {
+    config = { ...config, publicOrigin: normalizeRemoteOrigin(config.publicOrigin) };
+    if (!config.sshTarget) throw new Error('dsh-remote-control: SSH mode requires an SSH target.');
+  }
+  if (config.persistDevices && !config.deviceStorePath) throw new Error('dsh-remote-control: choose an absolute deviceStorePath for persistent pairing.');
+  const deviceStore = config.persistDevices ? createDeviceStore(config.deviceStorePath) : undefined;
   const control = new RemoteControl({
-    ...config,
+    ...config, deviceStore,
     target: ctx.webServer.getOrigin(),
     authenticatedUrl: baseUrl => ctx.connection.authenticatedUrl(baseUrl),
   });
@@ -99,7 +115,7 @@ export async function apply(ctx, config) {
   });
   ctx.effect(() => ctx.tools.register({
     name: 'remote_control',
-    description: 'Read remote-access status, rename or revoke a paired device, or disconnect all devices. Enabling and pairing stay in local Settings; results exclude pairing credentials.',
+    description: 'Read entry reachability and paired devices, rename or revoke a device, or disconnect all devices. Enabling and pairing stay in local Settings; results exclude credentials.',
     parameters: {
       type: 'object',
       oneOf: [
@@ -140,6 +156,16 @@ export async function apply(ctx, config) {
       return control.summary();
     },
   }));
+  if (config.autoStart) {
+    queueMicrotask(() => {
+      if (control.disposed) return;
+      void control.restore().catch(error => {
+        if (!control.disposed && control.phase === 'off') {
+          control.phase = 'error'; control.error = safeError(error); control.publish();
+        }
+      });
+    });
+  }
 }
 
 function validateAction(input, agent) {

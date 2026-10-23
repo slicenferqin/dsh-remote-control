@@ -6,6 +6,10 @@ import { once, EventEmitter } from 'node:events'
 import { setTimeout as delay } from 'node:timers/promises'
 import { runInNewContext } from 'node:vm'
 import { createRemoteBridge } from '../src/bridge.js'
+import { createDeviceStore } from '../src/device-store.js'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+import { tmpdir } from 'node:os'
 
 const PUBLIC = 'https://amber-quiet-river-cloud.trycloudflare.com'
 const HOST = new URL(PUBLIC).host
@@ -229,24 +233,47 @@ async function fixture(t, options = {}) {
     authenticatedUrl: base => { const url = new URL(base); url.searchParams.set('token', LAUNCH); return url.href },
     ...options,
   })
+  const bridges = [bridge]
   bridge.setExternalOrigin(PUBLIC)
+  async function restart(extra = {}) {
+    await bridges.at(-1).close({ preserveDevices: true })
+    const next = await createRemoteBridge({ target,
+      authenticatedUrl: base => { const url = new URL(base); url.searchParams.set('token', LAUNCH); return url.href },
+      ...options, ...extra })
+    bridges.push(next)
+    next.setExternalOrigin(extra.externalOrigin ?? PUBLIC)
+    return next
+  }
   t.after(async () => {
-    await bridge.close()
+    const failures = []
+    for (const instance of bridges) {
+      try { await instance.close() } catch (error) { failures.push(error) }
+    }
     const closing = new Promise(resolve => server.close(resolve))
     for (const socket of sockets) socket.destroy()
     await closing
+    options.afterClose?.()
+    if (options.expectStoreFailure) {
+      assert.equal(failures.length, 1)
+      assert.match(failures[0].message, /^Remote device store is unavailable$/)
+    } else if (failures.length) throw failures[0]
   })
-  return { bridge, target, state, seen, sse, events, sockets }
+  return { bridge, restart, target, state, seen, sse, events, sockets }
 }
 
 test('restricts public origins and redirect paths and binds only to loopback', { timeout: 5000 }, async t => {
   const { bridge, target } = await fixture(t)
   assert.equal(new URL(bridge.origin).hostname, '127.0.0.1')
-  for (const origin of ['http://amber-quiet.trycloudflare.com', 'https://trycloudflare.com', 'https://evil.example',
-    'https://a.trycloudflare.com.evil.example', 'https://a.b.trycloudflare.com', 'https://user@a.trycloudflare.com',
-    'https://a.trycloudflare.com:444', 'https://a.trycloudflare.com/path', 'https://a.trycloudflare.com?token=x']) {
-    assert.throws(() => bridge.setExternalOrigin(origin), /Quick Tunnel/)
+  for (const origin of ['http://amber-quiet.trycloudflare.com', 'https://user@a.trycloudflare.com',
+    'https://a.trycloudflare.com:444', 'https://a.trycloudflare.com/path', 'https://a.trycloudflare.com?token=x',
+    'https://bad_host.example', 'https://a.example/#', 'https://a.example/a/..', 'https://a.example\\x', 'https://a.example?']) {
+    assert.throws(() => bridge.setExternalOrigin(origin), /HTTPS origin/)
   }
+  for (const origin of ['https://clawplay.club', 'https://entry.clawplay.club:443/', 'https://a.b.trycloudflare.com']) {
+    bridge.setExternalOrigin(origin)
+    assert.equal(bridge.snapshot().externalOrigin, new URL(origin).origin)
+  }
+  bridge.setExternalOrigin(PUBLIC)
   assert.equal(bridge.snapshot().externalOrigin, PUBLIC)
   for (const path of ['https://evil.example', '//evil.example', '/api/dsh-remote-control', '/%63onnect', '/?token=abc', '/a\r\nb']) {
     assert.throws(() => bridge.pairing(path))
@@ -965,6 +992,197 @@ test('a delayed proxy response cannot overwrite cookies from a newer refresh gen
   assert.equal(response.status, 200)
   assert.equal(response.headers['set-cookie'], undefined)
   assert.equal((await request(bridge.origin, '/', { headers: { cookie: cookieHeader(newer) } })).status, 200)
+})
+
+function persistentFixture() {
+  const directory = mkdtempSync(join(tmpdir(), 'dsh-bridge-store-'))
+  const afterClose = () => {
+    assert.equal(resolve(directory), directory)
+    assert.ok(directory.startsWith(join(tmpdir(), 'dsh-bridge-store-')))
+    rmSync(directory, { recursive: true, force: true })
+  }
+  const path = join(directory, 'devices.json')
+  return { path, deviceStore: createDeviceStore(path), afterClose }
+}
+
+test('disk reconstruction restores only refresh and re-exchanges a new Core cookie with the same id', { timeout: 5000 }, async t => {
+  const { path, deviceStore, afterClose } = persistentFixture()
+  deviceStore.writeIntent(true)
+  const { bridge, restart, state } = await fixture(t, { deviceStore, afterClose })
+  const original = await pair(bridge)
+  const first = bridge.snapshot().devices[0]
+  const raw = readFileSync(path, 'utf8')
+  for (const secret of [LAUNCH, AUTH.split('=')[1], onlyCookie(original, GATE).split('=')[1], onlyCookie(original, REFRESH_GATE).split('=')[1]]) {
+    assert.equal(raw.includes(secret), false)
+  }
+  state.auth = 'dsh-auth-test=new-host-cookie'
+  const next = await restart({ deviceStore: createDeviceStore(path) })
+  assert.equal(next.snapshot().devices[0].id, first.id)
+  assert.equal(next.snapshot().devices[0].pairedAt, first.pairedAt)
+  assert.equal(state.exchanges, 1)
+  const confirming = { cookie: original, 'x-dsh-remote-confirm': '1' }
+  assert.equal((await request(next.origin, '/__dsh_remote_device', { headers: confirming })).status, 401)
+  assert.equal((await request(next.origin, '/', { headers: { cookie: onlyCookie(original, GATE) } })).status, 401)
+  assert.equal((await upgraded(next.origin, { cookie: original })).status, 401)
+  const restored = await request(next.origin, '/', { headers: { cookie: original } })
+  assert.equal(restored.status, 200)
+  assert.equal(state.exchanges, 2)
+  assert.equal(JSON.parse(restored.body).headers.cookie, state.auth)
+  const current = cookieHeader(restored)
+  assert.notEqual(onlyCookie(current, REFRESH_GATE), onlyCookie(original, REFRESH_GATE))
+  assert.equal((await request(next.origin, '/__dsh_remote_device', { headers: { cookie: current, 'x-dsh-remote-confirm': '1' } })).status, 200)
+  next.renameDevice(first.id, 'Work phone')
+  assert.equal(createDeviceStore(path).load().devices[0].label, 'Work phone')
+  const third = await restart({ deviceStore: createDeviceStore(path) })
+  assert.equal(third.snapshot().devices[0].label, 'Work phone')
+  assert.equal((await refresh(third, original)).status, 401, 'grace and prior refresh hashes are never persisted')
+  const final = await refresh(third, current)
+  assert.equal(final.status, 200)
+  assert.equal(JSON.parse(final.body).id, first.id)
+  assert.equal(state.exchanges, 3)
+  assert.equal(createDeviceStore(path).readIntent(), true)
+})
+
+test('revoke and explicit shutdown cannot restore a persisted grant', { timeout: 5000 }, async t => {
+  for (const operation of ['revoke', 'close']) await t.test(operation, async t => {
+    const { path, deviceStore, afterClose } = persistentFixture()
+    deviceStore.writeIntent(true)
+    const { bridge, restart } = await fixture(t, { deviceStore, afterClose })
+    const cookie = await pair(bridge)
+    if (operation === 'revoke') bridge.revokeDevice(bridge.snapshot().devices[0].id)
+    else await bridge.close()
+    assert.equal(createDeviceStore(path).load().devices.length, 0)
+    const next = await restart({ deviceStore: createDeviceStore(path) })
+    assert.deepEqual(next.snapshot().devices, [])
+    assert.equal((await refresh(next, cookie)).status, 401)
+    assert.equal(createDeviceStore(path).readIntent(), true, 'controller owns explicit intent updates')
+  })
+})
+
+test('expired persisted refresh grants are removed and changing domains never migrates credentials', { timeout: 5000 }, async t => {
+  for (const operation of ['expiry', 'domain']) await t.test(operation, async t => {
+    let time = Date.now()
+    const { path, deviceStore, afterClose } = persistentFixture()
+    const { bridge, restart } = await fixture(t, { deviceStore, afterClose, now: () => time })
+    const cookie = await pair(bridge)
+    if (operation === 'expiry') time += 10 * DAY
+    const domain = operation === 'domain' ? 'https://clawplay.club' : PUBLIC
+    const next = await restart({ deviceStore: createDeviceStore(path), externalOrigin: domain })
+    assert.deepEqual(next.snapshot().devices, [])
+    assert.deepEqual(createDeviceStore(path).load().devices, [])
+    next.setExternalOrigin(PUBLIC)
+    assert.equal((await refresh(next, cookie)).status, 401)
+    const final = await restart({ deviceStore: createDeviceStore(path) })
+    assert.equal((await refresh(final, cookie)).status, 401)
+  })
+})
+
+test('bridge rejects corrupt or insecure persisted state before opening a listener', { timeout: 5000 }, async t => {
+  const { path, deviceStore, afterClose } = persistentFixture()
+  const { target } = await fixture(t, { afterClose })
+  deviceStore.writeIntent(true)
+  const options = { target, authenticatedUrl: value => value, deviceStore: createDeviceStore(path) }
+  chmodSync(path, 0o644)
+  await assert.rejects(createRemoteBridge(options), /^Error: Remote device store is unavailable$/)
+  chmodSync(path, 0o600)
+  writeFileSync(path, 'private-invalid-credential')
+  await assert.rejects(createRemoteBridge(options), /^Error: Remote device store is unavailable$/)
+  await assert.rejects(createRemoteBridge({ ...options, deviceStore: { load: () => Promise.resolve({}), save() {}, clear() {} } }), /Remote device store is unavailable/)
+})
+
+test('failed persistence never issues cookies, revokes memory grants and clears recoverable registry', { timeout: 5000 }, async t => {
+  for (const operation of ['pair', 'refresh', 'revoke']) await t.test(operation, async t => {
+    const { deviceStore: disk, afterClose } = persistentFixture()
+    disk.writeIntent(true)
+    let failWrites = false
+    const deviceStore = {
+      load: () => disk.load(),
+      save: value => { if (failWrites) throw new Error('private-path-and-token-must-not-escape'); disk.save(value) },
+      clear: () => disk.clear(),
+    }
+    const { bridge } = await fixture(t, { deviceStore, afterClose, expectStoreFailure: true })
+    const cookie = operation === 'pair' ? undefined : await pair(bridge)
+    const pending = operation === 'pair' ? bridge.pairing() : undefined
+    failWrites = true
+    if (operation === 'revoke') {
+      assert.throws(() => bridge.revokeDevice(bridge.snapshot().devices[0].id), /^Error: Remote device store is unavailable$/)
+    } else {
+      const response = operation === 'pair' ? await redeem(bridge, pending) : await refresh(bridge, cookie)
+      assert.equal(response.status, 502)
+      assert.equal(response.headers['set-cookie'], undefined)
+      assert.doesNotMatch(response.body, /private-path-and-token/)
+    }
+    assert.deepEqual(bridge.snapshot().devices, [])
+    assert.deepEqual(disk.load(), { version: 1, origin: null, devices: [] })
+    assert.equal(disk.readIntent(), true)
+    assert.equal((await request(bridge.origin, '/', { headers: { cookie } })).status, 503)
+    assert.throws(() => bridge.pairing(), /active tunnel/)
+  })
+})
+
+test('health identifies each bridge without issuing or disclosing credentials and enforces exact authority', { timeout: 5000 }, async t => {
+  const { bridge, restart, state } = await fixture(t)
+  const health = bridge.health()
+  assert.deepEqual(Object.keys(health).sort(), ['entryId', 'ok', 'service'])
+  assert.equal(health.ok, true)
+  assert.equal(health.service, 'dsh-remote-control')
+  assert.match(health.entryId, /^[0-9a-f-]{36}$/)
+  const path = '/__dsh_remote_health'
+  for (const cookie of [undefined, 'private-cookie', `${GATE}=invalid; ${GATE}=duplicate`]) {
+    const response = await request(bridge.origin, path, { headers: { origin: undefined, cookie } })
+    assert.equal(response.status, 200)
+    assert.deepEqual(JSON.parse(response.body), health)
+    assert.equal(response.headers['cache-control'], 'no-store')
+    assert.equal(response.headers['set-cookie'], undefined)
+  }
+  assert.equal(state.exchanges, 0)
+  for (const headers of [{ host: 'evil.example' }, { host: `${HOST}:443` }, { origin: 'null' }, { origin: `${PUBLIC}/` }]) {
+    assert.equal((await request(bridge.origin, path, { headers })).status, 403)
+  }
+  assert.equal((await request(bridge.origin, path, { method: 'HEAD' })).status, 405)
+  assert.equal((await request(bridge.origin, path, { method: 'POST' })).status, 405)
+  assert.equal((await upgraded(bridge.origin, { path })).status, 403)
+  const next = await restart()
+  assert.notEqual(next.health().entryId, health.entryId)
+})
+
+test('only genuine top-level HTML homepage 401s recover once through the existing confirmation flow', { timeout: 5000 }, async t => {
+  const { bridge, state } = await fixture(t)
+  let cookie = await pair(bridge)
+  const navigation = { accept: 'text/html,application/xhtml+xml', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', origin: undefined }
+  const response = await request(bridge.origin, '/', { headers: navigation })
+  assert.equal(response.status, 401)
+  assert.match(response.headers['content-type'], /text\/html/)
+  assert.equal(response.headers['set-cookie'], undefined)
+  assert.match(response.body, /const secret = null/)
+  let navigated
+  const entered = new Promise(resolve => { navigated = resolve })
+  const browser = pairingBrowser(response.body, { url: `${PUBLIC}/#secret=${'a'.repeat(43)}` }, 'iPhone', {
+    onNavigate: navigated,
+    async fetch(path, settings) {
+      const result = await request(bridge.origin, path, { method: settings.method,
+        headers: { cookie, ...settings.headers }, body: settings.body })
+      if (result.headers['set-cookie']) cookie = cookieHeader(result)
+      return { ok: result.status >= 200 && result.status < 300, status: result.status, json: async () => JSON.parse(result.body) }
+    },
+  })
+  assert.equal(await entered, '/')
+  assert.deepEqual(browser.navigations, ['/'])
+  assert.equal(browser.form.hidden, true)
+  assert.equal(state.exchanges, 2)
+  assert.equal((await request(bridge.origin, '/', { headers: { ...navigation, cookie } })).status, 200)
+  for (const [path, method, headers] of [
+    ['/sessions/abc', 'GET', navigation], ['/?return=/sessions/abc', 'GET', navigation],
+    ['/api/session', 'GET', navigation], ['/', 'POST', { ...navigation, origin: PUBLIC }],
+    ['/', 'HEAD', navigation], ['/', 'GET', { accept: 'text/html' }],
+    ['/', 'GET', { ...navigation, 'sec-fetch-dest': 'iframe' }],
+  ]) {
+    const rejected = await request(bridge.origin, path, { method, headers })
+    assert.equal(rejected.status, 401)
+    assert.match(rejected.headers['content-type'], /text\/plain/)
+    assert.equal(rejected.headers['set-cookie'], undefined)
+  }
+  assert.equal((await upgraded(bridge.origin, { path: '/' })).status, 401)
 })
 
 test('revoke, domain changes and close cancel pending refresh without issuing late cookies', { timeout: 5000 }, async t => {

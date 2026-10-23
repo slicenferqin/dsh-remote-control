@@ -3,6 +3,9 @@ import https from 'node:https'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import httpProxy from 'http-proxy'
 import { createPairingResumer } from './pairing-resume.js'
+import { normalizeRemoteOrigin, validateDeviceSnapshot } from './device-store.js'
+
+const HEALTH_PATH = '/__dsh_remote_health'
 
 const PAIR_PATH = '/__dsh_remote_pair'
 const DEVICE_PATH = '/__dsh_remote_device'
@@ -61,13 +64,7 @@ function targetUrl(value) {
 }
 
 function externalUrl(value) {
-  const url = new URL(value)
-  if (url.protocol !== 'https:' || url.port || url.username || url.password
-    || url.pathname !== '/' || url.search || url.hash
-    || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.trycloudflare\.com$/.test(url.hostname)) {
-    throw new TypeError('external origin must be an HTTPS Quick Tunnel origin')
-  }
-  return url
+  return new URL(normalizeRemoteOrigin(value))
 }
 
 // Decode before normalizing dots/slashes so encoded and double-encoded aliases
@@ -96,7 +93,7 @@ function blockedPath(path) {
 
 function sessionLocation(value = '/') {
   const path = canonicalPath(value)
-  if (blockedPath(path) || path === PAIR_PATH || path === DEVICE_PATH || path === REFRESH_PATH || /[\r\n#]/.test(value)) {
+  if (blockedPath(path) || path === PAIR_PATH || path === DEVICE_PATH || path === REFRESH_PATH || path === HEALTH_PATH || /[\r\n#]/.test(value)) {
     throw new TypeError('sessionPath must be an ordinary local DSH path')
   }
   const url = new URL(value, 'https://bridge.invalid')
@@ -170,12 +167,12 @@ function readBody(req) {
   })
 }
 
-function pairingPage() {
+function pairingPage(recoveryOnly = false) {
   const nonce = randomBytes(18).toString('base64')
   return {
     csp: `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`,
     html: `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>配对 DeepSeek Harness</title><style nonce="${nonce}">body{font:16px system-ui;max-width:28rem;margin:12vh auto;padding:1.5rem;line-height:1.6}input,button{box-sizing:border-box;width:100%;font:inherit;padding:.75rem;margin-top:.75rem}button{cursor:pointer}p{color:#555}</style><h1 id="title">配对此设备</h1><p id="intro">确认设备名称后，此设备可以访问你的 DeepSeek Harness。</p><form method="post" action="${PAIR_PATH}"><input type="hidden" name="secret" id="secret"><label>设备名称<input id="label" name="label" required minlength="1" maxlength="80" placeholder="例如：我的手机" autocomplete="off"></label><button id="pair" type="submit" disabled>配对并进入</button></form><p id="status" role="status">请使用电脑上生成的配对二维码打开此页面。</p><button id="retry" type="button" hidden>重试恢复</button><p><a href="/">进入首页</a></p><script nonce="${nonce}">
-const secret = new URLSearchParams(location.hash.slice(1)).get('secret');
+const secret = ${recoveryOnly ? 'null' : "new URLSearchParams(location.hash.slice(1)).get('secret')"};
 history.replaceState(null, '', location.pathname);
 const form = document.querySelector('form');
 const label = document.getElementById('label');
@@ -254,6 +251,7 @@ export async function createRemoteBridge({
   refreshRetryMs = 30_000,
   now = Date.now,
   maxDevices = 8,
+  deviceStore,
   onChange,
 } = {}) {
   const upstream = targetUrl(target)
@@ -265,6 +263,18 @@ export async function createRemoteBridge({
   positiveInteger(refreshRetryMs, 'refreshRetryMs')
   if (typeof now !== 'function' || !Number.isSafeInteger(now()) || now() < 0) throw new TypeError('now must return an epoch millisecond integer')
   positiveInteger(maxDevices, 'maxDevices', 256)
+  if (deviceStore && !['load', 'save', 'clear'].every(name => typeof deviceStore[name] === 'function')) {
+    throw new TypeError('deviceStore must provide synchronous load, save and clear methods')
+  }
+  let restored
+  if (deviceStore) {
+    try { restored = validateDeviceSnapshot(deviceStore.load()) } catch { throw new Error('Remote device store is unavailable') }
+    if (restored.devices.length > maxDevices || restored.devices.some(device => device.lastSeenAt > now())) {
+      throw new Error('Remote device store is unavailable')
+    }
+  }
+  const entryId = randomUUID()
+  let storageFailed = false
   let external
   let origin
   let closed = false
@@ -279,6 +289,35 @@ export async function createRemoteBridge({
   const exchanges = new Set()
   const agent = upstream.protocol === 'https:' ? new https.Agent({ keepAlive: false }) : new http.Agent({ keepAlive: false })
   const proxy = httpProxy.createProxyServer({ target: upstream.origin, changeOrigin: true, xfwd: false, agent })
+
+  function health() {
+    return { ok: true, service: 'dsh-remote-control', entryId }
+  }
+
+  function storageOperation(operation) {
+    if (!deviceStore) return
+    if (storageFailed) throw new Error('Remote device store is unavailable')
+    try {
+      const result = operation()
+      if (result && typeof result.then === 'function') throw new Error('Asynchronous device store')
+    } catch {
+      storageFailed = true
+      restored = undefined
+      clearPairing()
+      for (const controller of exchanges) controller.abort()
+      for (const device of devices.values()) destroyDevice(device, false)
+      // A failed rotation must never keep a usable old grant in memory.
+      // Best-effort erase also prevents restoration when the filesystem permits it.
+      try { deviceStore.clear() } catch { /* Keep all public errors fixed. */ }
+      throw new Error('Remote device store is unavailable')
+    }
+  }
+
+  function persistRegistry(values = [...devices.values()]) {
+    storageOperation(() => deviceStore.save({ version: 1, origin: external?.origin ?? restored?.origin ?? null,
+      devices: values.map(({ id, label, pairedAt, lastSeenAt, refreshHash, refreshExpiresAt }) =>
+        ({ id, label, pairedAt, lastSeenAt, refreshHash, refreshExpiresAt })) }))
+  }
 
   function snapshot() {
     for (const device of devices.values()) {
@@ -325,7 +364,8 @@ export async function createRemoteBridge({
     device.streams.clear()
   }
 
-  function destroyDevice(device) {
+  function destroyDevice(device, persist = true) {
+    if (persist) persistRegistry([...devices.values()].filter(value => value !== device))
     device.revoked = true
     device.refreshController?.abort()
     clearTimeout(device.timer)
@@ -348,12 +388,14 @@ export async function createRemoteBridge({
     if (device.refreshExpiresAt <= time) { destroyDevice(device); changed(); return }
     if (device.expiresAt <= time) destroyStreams(device)
     const deadline = device.expiresAt > time ? Math.min(device.expiresAt, device.refreshExpiresAt) : device.refreshExpiresAt
-    device.timer = setTimeout(() => expireDevice(device), Math.min(deadline - time, MAX_TIMER))
+    device.timer = setTimeout(() => {
+      try { expireDevice(device) } catch { /* Storage failures already revoke all memory grants. */ }
+    }, Math.min(deadline - time, MAX_TIMER))
     device.timer.unref()
   }
 
   function checkRequest(req, websocket = false) {
-    if (closed || !external) throw new RequestError(503, 'Remote access is unavailable')
+    if (closed || storageFailed || !external) throw new RequestError(503, 'Remote access is unavailable')
     if (req.headers.host !== external.host) throw new RequestError(403, 'Invalid request authority')
     // Missing Origin is normal for navigations/assets. Mutations and WebSocket
     // handshakes must positively identify the same HTTPS origin.
@@ -399,6 +441,7 @@ export async function createRemoteBridge({
       return false
     }
     if (device.label !== label) {
+      persistRegistry([...devices.values()].map(value => value === device ? { ...value, label } : value))
       device.label = label
       changed()
     }
@@ -534,6 +577,9 @@ export async function createRemoteBridge({
           requireLive(device)
           if (controller.signal.aborted || external.origin !== expectedOrigin) throw new Error('Exchange cancelled')
           const result = credentials(cookies, now())
+          const updated = { ...device, hash: result.hash, refreshHash: result.refreshHash,
+            expiresAt: result.expiresAt, refreshExpiresAt: result.refreshExpiresAt, lastSeenAt: now() }
+          persistRegistry([...devices.values()].map(value => value === device ? updated : value))
           // Expired streams must close even if the timer has not run yet.
           if (device.expiresAt <= now()) destroyStreams(device)
           clearGrace(device)
@@ -626,6 +672,7 @@ export async function createRemoteBridge({
       const device = { id: randomUUID(), hash: result.hash, refreshHash: result.refreshHash, label,
         origin: external.origin, pairedAt, lastSeenAt: pairedAt, expiresAt: result.expiresAt,
         refreshExpiresAt: result.refreshExpiresAt, streams: new Set() }
+      persistRegistry([...devices.values(), device])
       devices.set(device.id, device)
       deviceTokens.set(device.hash, device)
       refreshTokens.set(device.refreshHash, device)
@@ -678,6 +725,11 @@ export async function createRemoteBridge({
   const server = http.createServer((req, res) => {
     Promise.resolve().then(async () => {
       const path = checkRequest(req)
+      if (path === HEALTH_PATH) {
+        if (req.method !== 'GET') { respond(res, 405, 'Method not allowed', { allow: 'GET' }); return }
+        respond(res, 200, JSON.stringify(health()), { 'content-type': 'application/json; charset=utf-8' })
+        return
+      }
       if (path === PAIR_PATH) {
         if (req.method === 'GET' || req.method === 'HEAD') {
           const page = pairingPage()
@@ -705,8 +757,18 @@ export async function createRemoteBridge({
       if (path === DEVICE_PATH) { await manageDevice(req, res, device); return }
       rewriteRequest(req)
       proxy.web(req, res)
-    }).catch(error => respond(res, error instanceof RequestError ? error.status : 500,
-      error instanceof RequestError ? error.message : 'Remote request failed'))
+    }).catch(error => {
+      if (error instanceof RequestError && error.status === 401 && req.method === 'GET' && req.url === '/'
+        && req.headers['sec-fetch-mode'] === 'navigate' && req.headers['sec-fetch-dest'] === 'document'
+        && /(?:^|,)\s*text\/html(?:\s*;|\s*,|$)/i.test(req.headers.accept ?? '')) {
+        const page = pairingPage(true)
+        respond(res, 401, page.html, { 'referrer-policy': 'same-origin', 'content-type': 'text/html; charset=utf-8',
+          'content-security-policy': page.csp })
+        return
+      }
+      respond(res, error instanceof RequestError ? error.status : 500,
+        error instanceof RequestError ? error.message : 'Remote request failed')
+    })
   })
   server.headersTimeout = 10_000
   server.requestTimeout = 15_000
@@ -714,7 +776,7 @@ export async function createRemoteBridge({
   server.on('upgrade', (req, socket, head) => {
     try {
       const path = checkRequest(req, true)
-      if (path === PAIR_PATH || path === DEVICE_PATH || path === REFRESH_PATH) throw new RequestError(403, 'Not a WebSocket endpoint')
+      if (path === PAIR_PATH || path === DEVICE_PATH || path === REFRESH_PATH || path === HEALTH_PATH) throw new RequestError(403, 'Not a WebSocket endpoint')
       const device = authorize(req)
       track(device.streams, socket)
       rewriteRequest(req)
@@ -735,12 +797,25 @@ export async function createRemoteBridge({
       if (external?.origin === next.origin) return
       clearPairing()
       for (const controller of exchanges) controller.abort()
-      for (const device of devices.values()) destroyDevice(device)
+      for (const device of devices.values()) destroyDevice(device, false)
+      const saved = restored
+      restored = undefined
+      const firstOrigin = !external
       external = next
+      if (firstOrigin && saved?.origin === external.origin) {
+        for (const record of saved.devices) {
+          if (record.refreshExpiresAt <= now()) continue
+          const device = { ...record, origin: external.origin, hash: undefined, expiresAt: 0, streams: new Set() }
+          devices.set(device.id, device)
+          refreshTokens.set(device.refreshHash, device)
+          expireDevice(device)
+        }
+      }
+      persistRegistry()
       changed()
     },
     pairing(sessionPath = '/') {
-      if (closed || !external) throw new Error('Remote bridge has no active tunnel')
+      if (closed || storageFailed || !external) throw new Error('Remote bridge has no active tunnel')
       const location = sessionLocation(sessionPath)
       const secret = randomBytes(32).toString('base64url')
       clearPairing()
@@ -760,14 +835,21 @@ export async function createRemoteBridge({
       return true
     },
     snapshot,
-    close() {
+    health,
+    close({ preserveDevices = false } = {}) {
       if (closing) return closing
       closed = true
+      let storageError
+      try {
+        if (preserveDevices) { if (external) persistRegistry() }
+        else storageOperation(() => deviceStore.clear())
+      } catch (error) { storageError = error }
+      restored = undefined
       clearPairing()
       for (const controller of exchanges) controller.abort()
-      for (const device of devices.values()) destroyDevice(device)
+      for (const device of devices.values()) destroyDevice(device, false)
       closing = new Promise((resolve, reject) => {
-        server.close(error => error ? reject(error) : resolve())
+        server.close(error => error || storageError ? reject(error ?? storageError) : resolve())
         for (const socket of sockets) socket.destroy()
         agent.destroy()
         proxy.close()

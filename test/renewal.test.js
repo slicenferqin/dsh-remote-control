@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { runInNewContext } from 'node:vm';
 import { createCredentialRenewer } from '../src/renewal.js';
 
 const device = (overrides = {}) => ({
@@ -10,7 +11,7 @@ const device = (overrides = {}) => ({
 });
 const response = (value = device(), status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => value });
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
-async function flush() { for (let index = 0; index < 16; index++) await Promise.resolve(); }
+async function flush() { await new Promise(resolve => setImmediate(resolve)); }
 
 function clock() {
   let time = 0;
@@ -354,76 +355,181 @@ test('disposing a tab waiting for a Web Lock prevents its queued POST', async t 
   assert.equal(locks.active, 0);
 });
 
-test('client enables renewal only on HTTPS Quick Tunnel origins and renders expired credentials at the root', async () => {
-  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
-  const previousDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+const bridgeMarker = () => ({ ok: true, service: 'dsh-remote-control', entryId: 'unit-bridge' });
+
+// Exercise Client activation and the embedded renewer without mounting UI components.
+async function clientFixture(t, {
+  origin = 'https://entry.clawplay.club',
+  health = () => response(bridgeMarker()),
+  credentials = () => response(),
+} = {}) {
+  const time = clock();
+  const browser = new BrowserEvents();
+  const document = new BrowserEvents();
+  const requests = [];
+  const entries = [];
+  const cleanups = [];
   let factory;
-  try {
-    globalThis.window = { __ModuleLoader__: { load(module) { factory = module.factory; } } };
-    await import('../client.js');
-    const origins = [
-      ['http://127.0.0.1:3080', false], ['https://localhost', false],
-      ['http://phone.trycloudflare.com', false], ['https://trycloudflare.com', false],
-      ['https://nested.phone.trycloudflare.com', false], ['https://phone.trycloudflare.com.evil.test', false],
-      ['https://phone.trycloudflare.com:8443', false], ['https://phone.trycloudflare.com', true],
-      ['https://phone-with-hyphens.trycloudflare.com', true],
-    ];
-    for (const [origin, enabled] of origins) {
-      for (const status of enabled ? [200, 401, 403] : [200]) {
-        const browser = new BrowserEvents();
-        const document = new BrowserEvents();
-        document.visibilityState = 'visible';
-        Object.defineProperty(document, 'cookie', { get() { throw new Error('Credentials must remain HttpOnly'); } });
-        Object.defineProperty(browser, 'localStorage', { get() { throw new Error('Credentials must not use localStorage'); } });
-        browser.location = new URL(origin);
-        const requests = [];
-        browser.fetch = (url, options) => { requests.push({ url, options }); return response(device(), status); };
-        globalThis.window = browser;
-        globalThis.document = document;
-        const entries = [];
-        const cleanup = [];
-        const React = {
-          createElement: (type, props, ...children) => ({ type, props, children }),
-          useSyncExternalStore: (subscribe, snapshot) => snapshot(),
-        };
-        const plugin = factory(name => { assert.equal(name, 'react'); return React; });
-        const locale = JSON.parse(await readFile(new URL('../locale/zh.json', import.meta.url), 'utf8'));
-        plugin.apply({
-          effect(callback) { const dispose = callback(); cleanup.push(dispose); return dispose; },
-          locale: {
-            register: () => () => {}, bind: () => key => locale.ui[key],
-            subscribe: () => () => {}, getSnapshot: () => ({ active: 'zh' }),
-          },
-          slots: {
-            inject(name, callback) { return callback(); },
-            register(options, component) { entries.push({ options, component }); return () => {}; },
-          },
-        });
-        try {
-          await flush();
-          assert.equal(requests.length, enabled ? 1 : 0, origin);
-          const overlay = entries.find(entry => entry.options.id === 'dsh-remote-control.credentials');
-          assert.equal(Boolean(overlay), enabled, origin);
-          if (enabled) {
-            assert.equal(overlay.options.name, 'shell.overlay');
-            const notice = overlay.component();
-            if (status === 200) assert.equal(notice, null);
-            else {
-              assert.equal(notice.props.role, 'alert');
-              assert.equal(notice.children[0], '设备已过期或被撤销，请重新配对。');
-              assert.equal(browser.listenerCount + document.listenerCount, 0);
-            }
-          }
-        } finally {
-          for (const dispose of cleanup.reverse()) if (typeof dispose === 'function') dispose();
-        }
-      }
-    }
-  } finally {
-    if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow); else delete globalThis.window;
-    if (previousDocument) Object.defineProperty(globalThis, 'document', previousDocument); else delete globalThis.document;
+  let disposed = false;
+  document.visibilityState = 'visible';
+  Object.defineProperty(document, 'cookie', { get() { throw new Error('Credentials must remain HttpOnly'); } });
+  Object.defineProperty(browser, 'localStorage', { get() { throw new Error('Credentials must not use localStorage'); } });
+  browser.location = new URL(origin);
+  // Browser fetch always returns a promise, including for an immediate response.
+  browser.fetch = async (url, options) => {
+    requests.push({ url, options });
+    return url === '/__dsh_remote_health' ? health(url, options) : credentials(url, options);
+  };
+  browser.__ModuleLoader__ = { load(module) { factory = module.factory; } };
+  const source = await readFile(new URL('../client.js', import.meta.url), 'utf8');
+  runInNewContext(source, { window: browser, document, AbortController, ...time });
+  const plugin = factory(name => {
+    assert.equal(name, 'react');
+    return { createElement() { throw new Error('This logic fixture does not render components'); } };
+  });
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    for (const cleanup of [...cleanups].reverse()) if (typeof cleanup === 'function') cleanup();
+  }
+  t.after(dispose);
+  plugin.apply({
+    effect(callback) { const cleanup = callback(); cleanups.push(cleanup); return cleanup; },
+    locale: { register: () => () => {}, bind: () => key => key },
+    slots: {
+      inject(name, callback) { return callback(); },
+      register(options, component) { entries.push({ options, component }); return () => {}; },
+    },
+  });
+  return { time, browser, document, requests, entries, dispose,
+    credentialRequests: () => requests.filter(request => request.url !== '/__dsh_remote_health') };
+}
+
+test('owned HTTPS and Quick domains start the embedded renewer only after a valid bridge health marker', async t => {
+  for (const origin of ['https://clawplay.club', 'https://entry.clawplay.club', 'https://phone.trycloudflare.com',
+    'https://phone-with-hyphens.trycloudflare.com', 'https://other-owned.example']) {
+    await t.test(origin, async t => {
+      const gate = deferred();
+      const f = await clientFixture(t, { origin, health: () => gate.promise });
+      await flush();
+      assert.deepEqual(f.requests.map(request => request.url), ['/__dsh_remote_health']);
+      assert.deepEqual(f.time.delays(), [10_000]);
+      assert.equal(f.browser.listenerCount + f.document.listenerCount, 0);
+      const probe = f.requests[0].options;
+      assert.equal(probe.credentials, 'same-origin');
+      assert.equal(probe.cache, 'no-store');
+      assert.equal(probe.redirect, 'error');
+      assert.ok(probe.signal instanceof AbortSignal);
+      gate.resolve(response(bridgeMarker()));
+      await flush();
+      assert.deepEqual(f.requests.map(request => request.url), ['/__dsh_remote_health', '/__dsh_remote_device']);
+      assert.equal(f.requests[1].options.method, 'GET');
+      assert.equal(f.requests[1].options.credentials, 'same-origin');
+      assert.equal(f.browser.listenerCount + f.document.listenerCount, 3);
+      assert.deepEqual(f.time.delays(), [1000]);
+      await f.time.advance(1000);
+      assert.equal(f.requests[2].url, '/__dsh_remote_refresh');
+      assert.equal(f.requests[2].options.method, 'POST');
+      assert.equal(f.requests[2].options.body, '{}');
+      f.dispose();
+      assert.equal(f.browser.listenerCount + f.document.listenerCount, 0);
+      assert.deepEqual(f.time.delays(), []);
+    });
   }
 });
+
+test('HTTP, loopback and non-default HTTPS ports do not probe or start credential renewal', async t => {
+  for (const origin of ['http://127.0.0.1:3080', 'http://clawplay.club', 'http://phone.trycloudflare.com',
+    'https://localhost', 'https://127.0.0.1', 'https://[::1]', 'https://entry.clawplay.club:8443']) {
+    await t.test(origin, async t => {
+      const f = await clientFixture(t, { origin });
+      await flush();
+      await f.time.advance(100_000);
+      assert.deepEqual(f.requests, []);
+      assert.equal(f.browser.listenerCount + f.document.listenerCount, 0);
+      assert.deepEqual(f.time.delays(), []);
+      assert.equal(f.entries.some(entry => entry.options.id === 'dsh-remote-control.credentials'), false);
+    });
+  }
+});
+
+test('unrelated HTTPS health errors, HTML or missing bridge markers never start renewal', async t => {
+  const cases = [
+    ['404', () => response(null, 404)],
+    ['503', () => response(null, 503)],
+    ['HTML', () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected HTML'); } })],
+    ['no marker', () => response({})],
+    ['wrong service', () => response({ ok: true, service: 'another-app' })],
+    ['not healthy', () => response({ ok: false, service: 'dsh-remote-control' })],
+    ['no ok flag', () => response({ service: 'dsh-remote-control' })],
+    ['null JSON', () => response(null)],
+    ['network failure', () => Promise.reject(new Error('private network details'))],
+  ];
+  for (const [name, health] of cases) await t.test(name, async t => {
+    const f = await clientFixture(t, { origin: 'https://unrelated.example', health });
+    await flush();
+    assert.deepEqual(f.requests.map(request => request.url), ['/__dsh_remote_health']);
+    assert.equal(f.browser.listenerCount + f.document.listenerCount, 0);
+    assert.deepEqual(f.time.delays(), []);
+    f.browser.emit('online');
+    f.browser.emit('pageshow');
+    f.document.emit('visibilitychange');
+    await f.time.advance(100_000);
+    assert.deepEqual(f.credentialRequests(), []);
+  });
+});
+
+for (const stage of ['fetch', 'json']) {
+  test(`disposing during health ${stage} aborts the probe and prevents a late renewer start`, async t => {
+    const gate = deferred();
+    const f = await clientFixture(t, { health: () => stage === 'fetch'
+      ? gate.promise : { ok: true, json: () => gate.promise } });
+    await flush();
+    const signal = f.requests[0].options.signal;
+    assert.equal(signal.aborted, false);
+    f.dispose();
+    assert.equal(signal.aborted, true);
+    assert.deepEqual(f.time.delays(), []);
+    gate.resolve(stage === 'fetch' ? response(bridgeMarker()) : bridgeMarker());
+    await flush();
+    f.browser.emit('online');
+    f.document.emit('visibilitychange');
+    await f.time.advance(100_000);
+    assert.deepEqual(f.credentialRequests(), []);
+    assert.equal(f.browser.listenerCount + f.document.listenerCount, 0);
+    assert.deepEqual(f.time.delays(), []);
+  });
+}
+
+test('health probe timeout cannot start renewal from an uncooperative late response', async t => {
+  const gate = deferred();
+  const f = await clientFixture(t, { health: () => gate.promise });
+  const signal = f.requests[0].options.signal;
+  await f.time.advance(9999);
+  assert.equal(signal.aborted, false);
+  assert.deepEqual(f.credentialRequests(), []);
+  await f.time.advance(1);
+  assert.equal(signal.aborted, true);
+  gate.resolve(response(bridgeMarker()));
+  await flush();
+  assert.deepEqual(f.credentialRequests(), []);
+  assert.equal(f.browser.listenerCount + f.document.listenerCount, 0);
+  assert.deepEqual(f.time.delays(), []);
+});
+
+for (const status of [401, 403]) {
+  test(`valid health followed by credential ${status} stops the embedded renewer`, async t => {
+    const f = await clientFixture(t, { credentials: () => response(null, status) });
+    await flush();
+    assert.deepEqual(f.requests.map(request => request.url), ['/__dsh_remote_health', '/__dsh_remote_device']);
+    assert.equal(f.browser.listenerCount + f.document.listenerCount, 0);
+    assert.deepEqual(f.time.delays(), []);
+    f.browser.emit('online');
+    f.browser.emit('pageshow');
+    await f.time.advance(100_000);
+    assert.equal(f.requests.length, 2);
+  });
+}
 
 test('the committed client embeds the same self-contained helper and localized messages', async () => {
   const source = await readFile(new URL('../client.js', import.meta.url), 'utf8');

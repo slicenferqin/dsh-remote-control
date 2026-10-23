@@ -182,12 +182,17 @@ window.__ModuleLoader__.load({
     "phase.loading": "Loading…",
     "phase.off": "Off",
     "phase.starting": "Starting…",
-    "phase.on": "On",
+    "phase.on": "Connected",
+    "health.checking": "Checking public entry…",
+    "health.reconnecting": "Reconnecting…",
+    "health.offline": "Entry unavailable",
+    "healthHint": "The entry is enabled but cannot currently reach this computer. Reconnection runs automatically.",
+    "persistentHint": "Device grants are saved privately on this computer. A controlled reload preserves pairing; switching Off revokes all devices.",
     "phase.stopping": "Stopping…",
     "phase.error": "Error",
     "busy": "Working…",
     "localOnly": "Manage remote control on this computer.",
-    "dependencyMissing": "cloudflared is unavailable on this computer. Install it using the plugin’s setup instructions, then retry.",
+    "dependencyMissing": "The configured tunnel program is unavailable. Check OpenSSH or cloudflared using the setup instructions, then retry.",
     "offHint": "Turn on remote control to create a pairing QR code.",
     "startingHint": "Preparing your secure connection. This may take a moment.",
     "stoppingHint": "Disconnecting remote devices…",
@@ -246,12 +251,17 @@ window.__ModuleLoader__.load({
     "phase.loading": "正在加载…",
     "phase.off": "已关闭",
     "phase.starting": "正在启动…",
-    "phase.on": "已开启",
+    "phase.on": "已连接",
+    "health.checking": "正在确认公网入口…",
+    "health.reconnecting": "正在重连…",
+    "health.offline": "入口暂不可用",
+    "healthHint": "入口已启用，但暂时无法连接这台电脑，系统正在自动重连。",
+    "persistentHint": "设备配对已私密保存于本机。正常重载保留配对，主动关闭入口会撤销全部设备。",
     "phase.stopping": "正在关闭…",
     "phase.error": "出错了",
     "busy": "正在处理…",
     "localOnly": "请在电脑端管理远程控制。",
-    "dependencyMissing": "这台电脑尚未安装可用的 cloudflared。请按插件使用说明安装后重试。",
+    "dependencyMissing": "当前隧道程序不可用。请按配置检查 OpenSSH 或 cloudflared 后重试。",
     "offHint": "开启远程控制后，即可生成配对二维码。",
     "startingHint": "正在建立安全连接，请稍候。",
     "stoppingHint": "正在断开远程设备…",
@@ -571,6 +581,9 @@ window.__ModuleLoader__.load({
         }
       }
       const phase = loaded ? (requestError && !snapshot.local ? 'error' : snapshot.phase) : 'loading';
+      const health = snapshot.connection?.status;
+      const healthPending = phase === 'on' && health && health !== 'online';
+      const phaseLabel = healthPending ? t(`health.${['checking', 'reconnecting'].includes(health) ? health : 'offline'}`) : t(`phase.${phase}`);
       const transitioning = snapshot.phase === 'starting' || snapshot.phase === 'stopping';
       const checked = snapshot.phase === 'on' || transitioning;
       const disabled = Boolean(busy) || !loaded || !snapshot.local || restricted || transitioning;
@@ -612,12 +625,14 @@ window.__ModuleLoader__.load({
           h('div', { className: 'dsh-rc-row' },
             h('div', { className: 'dsh-rc-copy' }, h('p', { className: 'dsh-rc-toggle-label', id: `${fieldId}-toggle` }, t('toggleLabel')), h('p', { className: 'dsh-rc-muted', id: `${fieldId}-description` }, t('toggleDescription'))),
             h('button', { type: 'button', role: 'switch', className: 'dsh-rc-switch', 'aria-checked': checked, 'aria-busy': Boolean(busy) || transitioning, 'aria-labelledby': `${fieldId}-toggle`, 'aria-describedby': `${fieldId}-description ${fieldId}-permission ${fieldId}-disable`, disabled: disabled || (!checked && !snapshot.dependency.available), onClick: () => control(checked ? 'disable' : 'enable') }, h('span', { className: 'dsh-rc-switch-thumb' }))),
-          h('span', { className: 'dsh-rc-status', 'data-phase': phase, role: 'status' }, t(`phase.${phase}`)),
+          h('span', { className: 'dsh-rc-status', 'data-phase': healthPending ? 'starting' : phase, role: 'status' }, phaseLabel),
           h('div', { className: 'dsh-rc-note' }, h('p', { id: `${fieldId}-permission` }, t('permission')), h('p', { className: 'dsh-rc-muted', id: `${fieldId}-disable` }, t('disableNotice'))),
           restricted ? h('p', { role: 'status' }, t('localOnly')) : null,
           loaded && snapshot.local && !restricted && !snapshot.dependency.available ? h('div', { className: 'dsh-rc-copy' }, h('p', { className: 'dsh-rc-muted' }, t('dependencyMissing')), h('div', { className: 'dsh-rc-actions' }, button('retry', refresh))) : null,
           loaded && snapshot.local && !restricted && !displayError && snapshot.phase !== 'on' ? h('p', { className: 'dsh-rc-muted' }, t(snapshot.phase === 'starting' ? 'startingHint' : snapshot.phase === 'stopping' ? 'stoppingHint' : 'offHint')) : null),
         errorBlock,
+        healthPending && !restricted ? h('div', { className: 'dsh-rc-note', role: 'status' }, t('healthHint')) : null,
+        snapshot.persistent && !restricted ? h('p', { className: 'dsh-rc-muted' }, t('persistentHint')) : null,
         disconnected && !restricted ? h('div', { className: 'dsh-rc-note dsh-rc-copy', role: 'status' }, h('p', null, t('streamDisconnected')), h('div', { className: 'dsh-rc-actions' }, button('reconnect', refresh, { disabled: Boolean(busy) }))) : null,
         snapshot.phase === 'on' && !restricted ? h('div', { className: 'dsh-rc-card' },
           h('div', { className: 'dsh-rc-row' }, h('h3', null, t('pairingTitle')), button(busy === 'pair' ? 'generating' : 'newPairing', () => control('pair'))),
@@ -676,7 +691,7 @@ window.__ModuleLoader__.load({
         }, LocalizedSection));
         const location = window.location;
         if (location.protocol === 'https:' && !location.port
-          && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.trycloudflare\.com$/.test(location.hostname)) {
+          && !['localhost', '127.0.0.1', '[::1]'].includes(location.hostname)) {
           let credentialState = { phase: 'idle' };
           const listeners = new Set();
           const snapshot = () => credentialState;
@@ -705,8 +720,15 @@ window.__ModuleLoader__.load({
               fetch: (...args) => window.fetch(...args), window, document,
               onState(next) { credentialState = next; for (const listener of listeners) listener(); },
             });
-            void renewer.start();
-            return () => renewer.dispose();
+            const probe = new AbortController();
+            const timeout = setTimeout(() => probe.abort(), 10000);
+            void window.fetch('/__dsh_remote_health', { credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: probe.signal })
+              .then(async response => {
+                if (!response.ok) return;
+                const marker = await response.json();
+                if (!probe.signal.aborted && marker?.ok === true && marker.service === 'dsh-remote-control') await renewer.start();
+              }).catch(() => {}).finally(() => clearTimeout(timeout));
+            return () => { probe.abort(); clearTimeout(timeout); renewer.dispose(); };
           }, 'dsh-remote-control: browser credential renewal');
         }
       },

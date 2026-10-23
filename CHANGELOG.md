@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0
+
+- Add optional fixed-domain HTTPS access through a restricted SSH reverse tunnel and a user-managed TLS gateway. Cloudflare Quick Tunnel remains the default; DSH, projects, and provider configuration stay local.
+- Add opt-in local device persistence containing only the current refresh hash, expiry, device metadata, and entry intent. Controlled reloads preserve same-domain refresh grants and device IDs; old access credentials are not restored, so the next valid refresh exchanges a new Core cookie for the current Host.
+- Keep explicit Off and device revocation durable. Off clears grants and records disabled intent. `autoStart` defaults to false and requires explicit configuration; a persisted Off takes precedence, while an empty store can start when automatic enablement is explicitly configured.
+- Add public health checks with a per-bridge entry ID, no credentials or device details, no cookies, and no caching. SSH readiness requires both the owned forward and matching public health; enabled, online, reconnecting, and offline remain distinct states.
+- Reconnect SSH without discarding valid device grants. Start browser renewal on owned HTTPS domains only after a valid bridge health marker, and cancel probes during disposal.
+- Offer the existing no-secret recovery page for genuine top-level homepage HTML 401s, retaining current-access confirmation, fixed-homepage navigation, Strict cookies, and unchanged API/POST/WebSocket authorization.
+- Document fixed-domain setup, loopback-only SSH forwarding, Nginx WebSocket/stream proxying, and certificate maintenance. HTTP-01 depends on the actual deployment; standalone TLS-ALPN maintenance that takes over 443 requires an outage window and service restoration.
+- Preserve local-user-only enablement/pairing management and the DSH compatibility range `>=0.2.1-rc.2 <0.3.0`. Changing domains requires a new pairing; stores support one writer, and the 120-second rotation grace is not persisted. A crash after disk rotation but before browser cookie application can require pairing again.
+
 ## 0.2.2
 
 - Recover an already paired browser that reopens the old pairing address without a one-use secret: refresh and confirm its HttpOnly cookies, then enter the fixed homepage.
