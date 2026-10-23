@@ -1,5 +1,8 @@
 {
-  "meta": {"title": "Remote control", "description": "Pair your phone to view and control DSH sessions on this computer through a fixed or temporary HTTPS entry."},
+  "meta": {
+    "title": "Remote control",
+    "description": "Pair your phone to view and control DSH sessions on this computer through a fixed or temporary HTTPS entry."
+  },
   "ui": {
     "nav": "Remote control",
     "title": "Remote control",
@@ -67,6 +70,8 @@
     "errorDetails": "Details: {message}",
     "errorCode": "Error code: {code}",
     "connectionError": "Remote control could not start. Check the details and retry.",
-    "credentialsExpired": "This device has expired or its access was revoked. Pair it again."
+    "credentialsExpired": "This device has expired or its access was revoked. Pair it again.",
+    "health.degraded": "Entry check degraded",
+    "healthDegradedHint": "The SSH carrier is retained while public checks are retried; a failed probe does not interrupt active sessions."
   }
 }

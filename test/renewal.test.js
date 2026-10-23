@@ -359,9 +359,10 @@ const bridgeMarker = () => ({ ok: true, service: 'dsh-remote-control', entryId: 
 
 // Exercise Client activation and the embedded renewer without mounting UI components.
 async function clientFixture(t, {
-  origin = 'https://entry.clawplay.club',
+  origin = 'https://entry.example.com',
   health = () => response(bridgeMarker()),
   credentials = () => response(),
+  connectionState = 'connected',
 } = {}) {
   const time = clock();
   const browser = new BrowserEvents();
@@ -369,6 +370,19 @@ async function clientFixture(t, {
   const requests = [];
   const entries = [];
   const cleanups = [];
+  const connectionListeners = new Set();
+  const reconnects = [];
+  const connection = {
+    state: {
+      getSnapshot: () => connectionState,
+      subscribe(listener) { connectionListeners.add(listener); return () => connectionListeners.delete(listener); },
+    },
+    reconnect() { reconnects.push({ requests: requests.length, state: connectionState }); },
+  };
+  function setConnectionState(next) {
+    connectionState = next;
+    for (const listener of [...connectionListeners]) listener();
+  }
   let factory;
   let disposed = false;
   document.visibilityState = 'visible';
@@ -394,6 +408,7 @@ async function clientFixture(t, {
   }
   t.after(dispose);
   plugin.apply({
+    connection,
     effect(callback) { const cleanup = callback(); cleanups.push(cleanup); return cleanup; },
     locale: { register: () => () => {}, bind: () => key => key },
     slots: {
@@ -402,11 +417,12 @@ async function clientFixture(t, {
     },
   });
   return { time, browser, document, requests, entries, dispose,
+    connection, connectionListeners, reconnects, setConnectionState,
     credentialRequests: () => requests.filter(request => request.url !== '/__dsh_remote_health') };
 }
 
 test('owned HTTPS and Quick domains start the embedded renewer only after a valid bridge health marker', async t => {
-  for (const origin of ['https://clawplay.club', 'https://entry.clawplay.club', 'https://phone.trycloudflare.com',
+  for (const origin of ['https://example.com', 'https://entry.example.com', 'https://phone.trycloudflare.com',
     'https://phone-with-hyphens.trycloudflare.com', 'https://other-owned.example']) {
     await t.test(origin, async t => {
       const gate = deferred();
@@ -439,8 +455,8 @@ test('owned HTTPS and Quick domains start the embedded renewer only after a vali
 });
 
 test('HTTP, loopback and non-default HTTPS ports do not probe or start credential renewal', async t => {
-  for (const origin of ['http://127.0.0.1:3080', 'http://clawplay.club', 'http://phone.trycloudflare.com',
-    'https://localhost', 'https://127.0.0.1', 'https://[::1]', 'https://entry.clawplay.club:8443']) {
+  for (const origin of ['http://127.0.0.1:3080', 'http://example.com', 'http://phone.trycloudflare.com',
+    'https://localhost', 'https://127.0.0.1', 'https://[::1]', 'https://entry.example.com:8443']) {
     await t.test(origin, async t => {
       const f = await clientFixture(t, { origin });
       await flush();
@@ -530,6 +546,170 @@ for (const status of [401, 403]) {
     assert.equal(f.requests.length, 2);
   });
 }
+
+test('embedded Client refreshes via POST after 900ms of Core connecting and reconnects only after ready metadata', async t => {
+  const ready = deferred();
+  const metadata = device({ refreshAfterMs: 60000 });
+  const f = await clientFixture(t, { credentials: url => url === '/__dsh_remote_device'
+    ? response(metadata) : { ok: true, status: 200, json: () => ready.promise } });
+  await flush();
+  assert.equal(f.connectionListeners.size, 1);
+  assert.equal(f.credentialRequests().length, 1);
+  f.setConnectionState('connecting');
+  for (let index = 0; index < 10; index++) f.setConnectionState('connecting');
+  await f.time.advance(899);
+  assert.equal(f.credentialRequests().length, 1);
+  await f.time.advance(1);
+  const request = f.credentialRequests()[1];
+  assert.equal(request.url, '/__dsh_remote_refresh');
+  assert.equal(request.options.method, 'POST');
+  assert.equal(request.options.credentials, 'same-origin');
+  assert.equal(request.options.cache, 'no-store');
+  assert.equal(request.options.redirect, 'error');
+  assert.equal(request.options.body, '{}');
+  assert.equal(f.reconnects.length, 0, 'an HTTP 200 alone is not ready until metadata is accepted');
+  ready.resolve(metadata);
+  await flush();
+  assert.equal(f.reconnects.length, 1);
+  assert.equal(f.reconnects[0].state, 'connecting');
+  for (let index = 0; index < 10; index++) f.setConnectionState('connecting');
+  await f.time.advance(5000);
+  assert.equal(f.credentialRequests().length, 2);
+  assert.equal(f.reconnects.length, 1);
+});
+
+test('embedded Client leaves a short self-healing Core outage untouched', async t => {
+  const f = await clientFixture(t, { credentials: () => response(device({ refreshAfterMs: 60000 })) });
+  await flush();
+  f.setConnectionState('connecting');
+  await f.time.advance(750);
+  f.setConnectionState('connected');
+  await f.time.advance(5000);
+  assert.equal(f.credentialRequests().length, 1);
+  assert.equal(f.reconnects.length, 0);
+});
+
+test('embedded Client never interrupts Core that heals during its pending credential POST', async t => {
+  const refreshed = deferred();
+  const metadata = device({ refreshAfterMs: 60000 });
+  const f = await clientFixture(t, { credentials: url => url === '/__dsh_remote_device'
+    ? response(metadata) : refreshed.promise });
+  await flush();
+  f.setConnectionState('connecting');
+  await f.time.advance(900);
+  assert.equal(f.credentialRequests().length, 2);
+  f.setConnectionState('connected');
+  refreshed.resolve(response(metadata));
+  await flush();
+  await f.time.advance(5000);
+  assert.equal(f.reconnects.length, 0);
+  assert.equal(f.credentialRequests().length, 2);
+});
+
+test('embedded Client disposal cancels the pending Core recovery grace timer', async t => {
+  const f = await clientFixture(t, { credentials: () => response(device({ refreshAfterMs: 60000 })) });
+  await flush();
+  f.setConnectionState('connecting');
+  await f.time.advance(899);
+  f.dispose();
+  assert.equal(f.connectionListeners.size, 0);
+  assert.deepEqual(f.time.delays(), []);
+  await f.time.advance(100000);
+  assert.equal(f.credentialRequests().length, 1);
+  assert.equal(f.reconnects.length, 0);
+});
+
+test('embedded Client disposal aborts a recovery POST and ignores late success', async t => {
+  const refreshed = deferred();
+  const metadata = device({ refreshAfterMs: 60000 });
+  const f = await clientFixture(t, { credentials: url => url === '/__dsh_remote_device'
+    ? response(metadata) : refreshed.promise });
+  await flush();
+  f.setConnectionState('connecting');
+  await f.time.advance(900);
+  const signal = f.credentialRequests()[1].options.signal;
+  assert.equal(signal.aborted, false);
+  f.dispose();
+  assert.equal(signal.aborted, true);
+  assert.equal(f.connectionListeners.size, 0);
+  assert.equal(f.browser.listenerCount + f.document.listenerCount, 0);
+  assert.deepEqual(f.time.delays(), []);
+  refreshed.resolve(response(metadata));
+  await flush();
+  f.setConnectionState('connecting');
+  await f.time.advance(100000);
+  assert.equal(f.credentialRequests().length, 2);
+  assert.equal(f.reconnects.length, 0);
+  assert.deepEqual(f.time.delays(), []);
+});
+
+test('embedded Client keeps recovery pending through renewer retrying and reconnects on the later ready notification', async t => {
+  let posts = 0;
+  const metadata = device({ refreshAfterMs: 60000, refreshRetryMs: 2500 });
+  const f = await clientFixture(t, { credentials: url => {
+    if (url === '/__dsh_remote_device') return response(metadata);
+    return ++posts === 1 ? response(null, 503) : response(metadata);
+  } });
+  await flush();
+  f.setConnectionState('connecting');
+  await f.time.advance(900);
+  assert.equal(posts, 1);
+  assert.equal(f.reconnects.length, 0);
+  for (let index = 0; index < 10; index++) f.setConnectionState('connecting');
+  await f.time.advance(2499);
+  assert.equal(posts, 1);
+  await f.time.advance(1);
+  assert.equal(posts, 2);
+  assert.equal(f.reconnects.length, 1);
+  for (let index = 0; index < 10; index++) f.setConnectionState('connecting');
+  await f.time.advance(5000);
+  assert.equal(posts, 2);
+  assert.equal(f.reconnects.length, 1);
+});
+
+for (const status of [401, 403]) {
+  test(`embedded Client recovery credential ${status} expires without a Core reconnect loop`, async t => {
+    const metadata = device({ refreshAfterMs: 60000 });
+    const f = await clientFixture(t, { credentials: url => url === '/__dsh_remote_device'
+      ? response(metadata) : response(null, status) });
+    await flush();
+    f.setConnectionState('connecting');
+    await f.time.advance(900);
+    assert.equal(f.credentialRequests().length, 2);
+    assert.equal(f.credentialRequests()[1].options.method, 'POST');
+    assert.equal(f.reconnects.length, 0);
+    assert.equal(f.browser.listenerCount + f.document.listenerCount, 0);
+    assert.deepEqual(f.time.delays(), []);
+    for (let index = 0; index < 10; index++) f.setConnectionState('connecting');
+    f.browser.emit('online');
+    f.browser.emit('pageshow');
+    await f.time.advance(100000);
+    assert.equal(f.credentialRequests().length, 2);
+    assert.equal(f.reconnects.length, 0);
+    assert.deepEqual(f.time.delays(), []);
+    f.dispose();
+    assert.equal(f.connectionListeners.size, 0);
+  });
+}
+
+test('embedded Core recovery cannot start before bridge health and initial credential validation', async t => {
+  const health = deferred();
+  const f = await clientFixture(t, { connectionState: 'connecting', health: () => health.promise,
+    credentials: () => response(device({ refreshAfterMs: 60000 })) });
+  await f.time.advance(900);
+  assert.equal(f.connectionListeners.size, 0);
+  assert.equal(f.credentialRequests().length, 0);
+  assert.equal(f.reconnects.length, 0);
+  health.resolve(response(bridgeMarker()));
+  await flush();
+  assert.equal(f.connectionListeners.size, 1);
+  assert.equal(f.credentialRequests().length, 1);
+  await f.time.advance(899);
+  assert.equal(f.credentialRequests().length, 1);
+  await f.time.advance(1);
+  assert.equal(f.credentialRequests().length, 2);
+  assert.equal(f.reconnects.length, 1);
+});
 
 test('the committed client embeds the same self-contained helper and localized messages', async () => {
   const source = await readFile(new URL('../client.js', import.meta.url), 'utf8');

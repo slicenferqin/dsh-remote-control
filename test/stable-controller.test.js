@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { RemoteControl } from '../src/controller.js';
 import { RemoteControlError } from '../src/tunnel.js';
 
-const PUBLIC_ORIGIN = 'https://dsh.clawplay.club';
+const PUBLIC_ORIGIN = 'https://dsh.example.com';
 const REFRESH_HASH = 'd'.repeat(64);
 const flush = async () => { for (let index = 0; index < 40; index++) await Promise.resolve(); };
 const clone = value => structuredClone(value);

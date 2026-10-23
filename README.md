@@ -4,7 +4,7 @@
 
 将手机浏览器配对到正在运行的 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai/deepseek-harness)，继续同一批会话、发送消息、回答问题、审批操作或停止任务。**DSH、项目文件和服务商配置始终留在运行 DSH 的电脑上。**
 
-0.3.0 提供两种 HTTPS 入口：默认的 Cloudflare Quick Tunnel 无需 Cloudflare 账号或自备域名；可选的 SSH 模式使用你管理的固定域名与 HTTPS 网关。两种模式均无需手机客户端，默认不自动开启远程入口。
+0.3.1 支持两种 HTTPS 入口：默认的 Cloudflare Quick Tunnel 无需 Cloudflare 账号或自备域名；可选的 SSH 模式使用你管理的固定域名与 HTTPS 网关。两种模式均无需手机客户端，默认不自动开启远程入口。
 
 这是独立维护的社区插件。当前完整手机体验建议同时安装 [dsh-mobile](https://github.com/slicenferqin/dsh-mobile)，获得以任务为中心的手机工作台。两个插件也可以分别独立安装。
 
@@ -46,7 +46,7 @@ SSH 连接由 DSH 电脑向中继服务器发起。服务器只承担 HTTPS 终�
 ## 兼容性
 
 - **Node.js 22.19 或更新版本**，已安装 DSH；profile 包管理需要 `PATH` 中有 `pnpm`。
-- 声明的 DSH 版本范围保持为 **`>=0.2.1-rc.2 <0.3.0`**。插件版本 0.3.0 不代表它要求 DSH 0.3.0。DSH 插件 API 尚未稳定，升级前请核对兼容性。
+- 声明的 DSH 版本范围保持为 **`>=0.2.1-rc.2 <0.3.0`**。插件版本 0.3.1 不代表它要求 DSH 0.3.0。DSH 插件 API 尚未稳定，升级前请核对兼容性。
 - 已在 **DSH 0.2.1-rc.2 源码构建版、macOS arm64** 上完成 live 浏览器和隧道验证；这不代表所有操作系统、浏览器和手机网络均经过端到端验证。
 - DSH Web origin 的主机名必须是 **`localhost`、`127.0.0.1` 或 `[::1]`**。默认 `dsh web` 监听 `127.0.0.1`。桥接不支持 LAN 地址或 `0.0.0.0`、`[::]` 等通配绑定。
 
@@ -55,7 +55,7 @@ SSH 连接由 DSH 电脑向中继服务器发起。服务器只承担 HTTPS 终�
 通过 GitHub tag 将社区发行版安装到 Web profile：
 
 ```sh
-dsh plugin --profile web add github:slicenferqin/dsh-remote-control#v0.3.0
+dsh plugin --profile web add github:slicenferqin/dsh-remote-control#v0.3.1
 ```
 
 默认 Quick 模式需要在运行 DSH 的电脑上安装 `cloudflared`：
@@ -119,7 +119,17 @@ dsh plugin --profile web add github:slicenferqin/dsh-mobile#v0.1.0
 
 ## 健康状态
 
-入口“已启用”不等于公网当前可达。状态包含 `connection.status`：`checking` 为检查中，`online` 表示最近一次公网探测到达本次桥接，`reconnecting` 表示暂时不可达并正在重试，`offline` 表示入口离线或发生需处理的错误。SSH 连接恢复期间保留有效配对；电脑休眠、断网、SSH 或证书故障仍会中断访问。
+入口“已启用”、SSH 进程存活和 Core WebSocket 已连接是不同状态。`connection.status` 可为 `checking`、`online`、`degraded`、`reconnecting` 或 `offline`。`lastHealthyAt` 记录最近一次确认当前桥接成功的时间，首次确认前为 `null`；它与最新探测时间 `checkedAt` 不同。
+
+0.3.1 中，已验证的 SSH 进程不会因为短暂公网 health 失败被主动终止：普通失败连续三次后标记为 `degraded`，并保留上次成功时间和现有传输；非法响应或不匹配的 `entryId` 会立即降级。再次收到匹配的健康响应后恢复 `online`。SSH 真正退出或反向转发失败时仍会自动重连。短失败期间保留 `online` 与历史成功记录，不代表最新请求一定成功；首次启动仍须通过当前桥接的公网确认。
+
+### 连接恢复与带宽
+
+Core 进入持续重连时，客户端在短暂宽限后为每次故障合并一次凭证恢复，复用续期器已有的网络重试；只有凭证已就绪且 Core 仍在重连，才最多提示一次 Core 立即重试。若 Core 已自行恢复、凭证已失效或插件已卸载，不会用这次恢复去打断当前流。它不放宽 WebSocket、Host / Origin 或 Cookie 校验。
+
+对已鉴权的 `GET /plugins/` 静态脚本/资源，若浏览器允许 gzip、上游为尚未编码的 200 响应且未请求 Range，桥接可在**本机进入 SSH 之前**以 gzip level 1 流式压缩。业务 API、JSON、SSE、WS、HEAD、Range 和已有编码响应保持原样。可选的 OpenSSH `Compression yes` 还能压缩 SSH 转发载荷，包括较大的 WS 帧；它与 HTTP gzip 独立，需结合 CPU 与链路测量。
+
+慢 WAN 还可能需要为 Core 的心跳和连接就绪配置更多时间。Core 默认 WS 心跳间隔为 2 秒，代际就绪超时为 15 秒；相关设置属于 Core，**本插件不修改这些默认值**。参阅 [Connection 官方文档](https://github.com/deepseek-ai/deepseek-harness/blob/main/packages/client/connection/README.md#connection-generation) 和 [Gateway 官方文档](https://github.com/deepseek-ai/deepseek-harness/blob/main/packages/api/gateway/README.md)。电脑休眠、断网或服务故障仍会中断访问。
 
 公开的 **`GET /__dsh_remote_health`** 在精确 Host / Origin 检查后、设备鉴权前返回：
 

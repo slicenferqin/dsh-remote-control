@@ -7,7 +7,7 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
 const sources = {
   'dsh-mobile': ['app.js', 'overview.js', 'styles.js', 'build.js', 'THIRD_PARTY_NOTICES.md'],
-  'dsh-remote-control': ['build-client.js', 'src/bridge.js', 'src/controller.js', 'src/device-store.js', 'src/ssh-tunnel.js', 'docs/stable-entry.md', 'src/renewal.js', 'src/pairing-resume.js', 'src/tunnel.js', 'src/cloudflared.yml'],
+  'dsh-remote-control': ['build-client.js', 'src/bridge.js', 'src/controller.js', 'src/connection-recovery.js', 'src/device-store.js', 'src/ssh-tunnel.js', 'docs/stable-entry.md', 'src/renewal.js', 'src/pairing-resume.js', 'src/tunnel.js', 'src/cloudflared.yml'],
 };
 assert.ok(Object.hasOwn(sources, manifest.name), 'Unknown package: review the release file requirements');
 assert.equal(manifest.license, 'MIT');

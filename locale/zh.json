@@ -1,5 +1,8 @@
 {
-  "meta": {"title": "远程控制", "description": "通过固定或临时 HTTPS 入口配对手机，查看和操作这台电脑的 DSH 会话。"},
+  "meta": {
+    "title": "远程控制",
+    "description": "通过固定或临时 HTTPS 入口配对手机，查看和操作这台电脑的 DSH 会话。"
+  },
   "ui": {
     "nav": "远程控制",
     "title": "远程控制",
@@ -67,6 +70,8 @@
     "errorDetails": "详细信息：{message}",
     "errorCode": "错误代码：{code}",
     "connectionError": "远程控制启动失败，请查看详细信息后重试。",
-    "credentialsExpired": "设备已过期或被撤销，请重新配对。"
+    "credentialsExpired": "设备已过期或被撤销，请重新配对。",
+    "health.degraded": "入口检测暂时异常",
+    "healthDegradedHint": "正在重试公网检测，SSH 隧道保持连接；探针抖动不会打断当前会话。"
   }
 }

@@ -61,9 +61,13 @@ Host dsh-relay
     KbdInteractiveAuthentication no
     ForwardAgent no
     RequestTTY no
+    # Optional: compress forwarded payloads before the WAN hop.
+    Compression yes
 ```
 
 插件会读取选定配置，并自行传入 `-NT`、回环 `-R` 转发、连接保活和 `ExitOnForwardFailure` 等参数。**转发目标是插件创建的受控桥接端口**，不是直接公开 DSH Web 端口。不要再用另一个 SSH 进程占用同一服务端转发端口。
+
+示例中的 `Compression yes` 是可选运维设置：它压缩 SSH 转发载荷，包括较大的 WS 帧，减少本机至中继的字节量；是否划算取决于 CPU 与数据可压缩性。0.3.1 的 HTTP gzip 则只处理已鉴权的 `/plugins/` 静态脚本/资源，在本机进入 SSH 前完成，业务 API、JSON、SSE、WS、HEAD、Range 和已有编码响应保持原样。两者独立；仅在 VPS 启用 HTTP gzip 无法减少此前本机至 VPS 的传输量。
 
 ## 4. HTTPS 网关：保留来源校验并支持 WebSocket / 流
 
@@ -140,7 +144,9 @@ autoStart: false
 
 ## 7. 健康状态与排查
 
-入口保持 enabled 时，`connection.status` 仍可能是 `checking`、`reconnecting` 或 `offline`。`online` 表示最近一次公网探测已到达**当前**桥接；不是持续可用保证。SSH 会重连并保留有效设备授权，电脑仍必须唤醒、联网并运行 DSH。
+入口保持 enabled 时，`connection.status` 仍可能是 `checking`、`degraded`、`reconnecting` 或 `offline`。`lastHealthyAt` 保存最近一次匹配当前桥接的成功时间，首次成功前为 `null`；`checkedAt` 是最新探测时间。`online` 与 SSH 进程存活都不保证 Core 的实际 WS 已就绪。
+
+0.3.1 在已验证入口上容忍短暂公网探测失败，不会据此杀掉存活的 SSH：普通失败连续三次后标记 `degraded`，非法响应或 `entryId` 不匹配则立即降级。传输与有效设备授权继续保留，直到匹配的健康响应恢复 `online`；SSH 真正退出或转发失败仍按退避重连。首次启动仍要求转发确认和有效公网 health。电脑仍必须唤醒、联网并运行 DSH。
 
 公网健康检查可使用不带任何凭证的请求：
 
@@ -168,6 +174,14 @@ Content-Type: application/json; charset=utf-8
 | health 属于其他 entry | 残留或错误的反向转发、错误的 upstream、缓存或虚假的静态响应。 |
 | 页面可开但 WS / 流断开 | Upgrade 头、HTTP/1.1、缓冲和代理超时配置。 |
 | 健康在线但配对凭证不可用 | 是否换了域名/浏览器、清过 Cookie、授权过期或被主动撤销。 |
+
+### Core 连接恢复与可选 WAN 预算
+
+已打开页面遇到桥接重建或凭证轮换时，Core 的 WS 可能先尝试重连。0.3.1 客户端在短暂宽限后合并一次 refresh，成功且 Core 仍处于 reconnecting 时最多提示一次重连；网络重试由现有续期器负责。Core 若已自行连接成功，不会被延迟完成的恢复结果再次断开；凭证失效或插件卸载后也不再触发。此流程不恢复旧 access、不放宽鉴权，也不靠重置配对来恢复连接。
+
+慢 WAN 的大资源或较大 WS 快照可能让 Pong、ready 帧排队。Core Gateway 默认 WS 心跳间隔为 2 秒，Connection 代际就绪超时默认 15 秒。可按链路最坏延迟评估增大 **Core** 的 `websocketHeartbeatIntervalMs` 与 `recovery.generationReadyTimeoutMs` 等预算；它们不是本插件配置字段，**公共插件不会修改 Core 默认值或源码**。变更后按 Core 文档刷新页面，并观察真正的 WS 连接与更新时间，而不只看 health。
+
+配置含义及作用位置参阅官方 [Connection 连接代际文档](https://github.com/deepseek-ai/deepseek-harness/blob/main/packages/client/connection/README.md#connection-generation) 与 [Gateway 文档](https://github.com/deepseek-ai/deepseek-harness/blob/main/packages/api/gateway/README.md)。压缩和增大预算只是部署选择，不能把失效凭证、错误 Origin 或不工作的隧道变成有效连接。
 
 ## 8. 证书签发与续期
 

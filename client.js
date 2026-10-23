@@ -168,6 +168,130 @@ window.__ModuleLoader__.load({
       return { start, refresh, dispose };
     }
     // END GENERATED CREDENTIAL RENEWER
+    // BEGIN GENERATED CONNECTION RECOVERY
+    // Generated from src/connection-recovery.js; run node build-client.js after changes.
+    function createConnectionCredentialRecovery({
+      connection,
+      refresh,
+      setTimeout: scheduleTimeout = globalThis.setTimeout,
+      clearTimeout: cancelTimeout = globalThis.clearTimeout,
+    } = {}) {
+      if (typeof connection?.state?.getSnapshot !== 'function'
+        || typeof connection?.state?.subscribe !== 'function'
+        || typeof connection?.reconnect !== 'function' || typeof refresh !== 'function') {
+        throw new TypeError('A Core connection and credential refresh function are required');
+      }
+      const GRACE_MS = 900;
+      let started = false;
+      let disposed = false;
+      let unsubscribe;
+      let timer;
+      let outage;
+      let inFlight;
+
+      function snapshot() {
+        try { return connection.state.getSnapshot(); } catch { return undefined; }
+      }
+      function clearTimer() {
+        if (timer !== undefined) cancelTimeout(timer);
+        timer = undefined;
+      }
+      function current(attempt) {
+        return started && !disposed && outage === attempt;
+      }
+      function reconnectIfReady(attempt) {
+        if (!current(attempt) || !attempt.ready || attempt.expired || attempt.reconnectIssued) return;
+        const state = snapshot();
+        if (state === 'connected') { connectionChanged(); return; }
+        if (state !== 'connecting') return;
+        // Claim the only nudge before calling Core: reconnect may synchronously publish state.
+        attempt.reconnectIssued = true;
+        attempt.ready = false;
+        try { connection.reconnect(); } catch { /* Core owns subsequent connection retries. */ }
+      }
+      function credentialState(attempt, next) {
+        if (!current(attempt) || !attempt.refreshInvoked || attempt.expired || attempt.reconnectIssued) return;
+        if (next?.phase === 'expired') {
+          attempt.expired = true;
+          attempt.ready = false;
+        } else if (next?.phase === 'ready') {
+          attempt.ready = true;
+          reconnectIfReady(attempt);
+        } else {
+          // Retain this outage while the existing renewer checks or retries the network.
+          attempt.ready = false;
+        }
+      }
+      function requestRecovery(attempt) {
+        if (!current(attempt) || attempt.refreshStarted || snapshot() !== 'connecting') return;
+        // An earlier outage may still own a shared renewer request. Its finally will reschedule.
+        if (inFlight) return;
+        attempt.refreshStarted = true;
+        const operation = Promise.resolve().then(() => {
+          if (!current(attempt)) return;
+          if (snapshot() !== 'connecting') { attempt.refreshStarted = false; return; }
+          attempt.refreshInvoked = true;
+          return refresh();
+        }).then(next => {
+          credentialState(attempt, next);
+        }, () => {
+          // A rejected refresh is retryable by the renewer, never a second helper request.
+          credentialState(attempt, { phase: 'retrying' });
+        }).finally(() => {
+          if (inFlight !== operation) return;
+          inFlight = undefined;
+          if (!disposed) connectionChanged();
+        });
+        // Set the shared operation before invoking refresh or any observer can reenter.
+        inFlight = operation;
+      }
+      function connectionChanged() {
+        if (!started || disposed) return;
+        const state = snapshot();
+        if (state === 'connected') {
+          clearTimer();
+          outage = undefined;
+          return;
+        }
+        if (state !== 'connecting') {
+          clearTimer();
+          return;
+        }
+        if (!outage) outage = { refreshStarted: false, refreshInvoked: false,
+          ready: false, reconnectIssued: false, expired: false };
+        const attempt = outage;
+        reconnectIfReady(attempt);
+        if (!current(attempt) || attempt.refreshStarted || timer !== undefined) return;
+        timer = scheduleTimeout(() => {
+          timer = undefined;
+          requestRecovery(attempt);
+        }, GRACE_MS);
+      }
+      function start() {
+        if (started || disposed) return;
+        started = true;
+        const stopListening = connection.state.subscribe(connectionChanged);
+        // A synchronous subscription callback may dispose the helper before subscribe returns.
+        if (disposed) { if (typeof stopListening === 'function') stopListening(); return; }
+        unsubscribe = stopListening;
+        connectionChanged();
+      }
+      function notifyCredentialState(next) {
+        if (disposed || !started || !outage) return;
+        credentialState(outage, next);
+      }
+      function dispose() {
+        if (disposed) return;
+        disposed = true;
+        clearTimer();
+        outage = undefined;
+        const stopListening = unsubscribe;
+        unsubscribe = undefined;
+        if (typeof stopListening === 'function') stopListening();
+      }
+      return { start, notifyCredentialState, dispose };
+    }
+    // END GENERATED CONNECTION RECOVERY
     // These flat dictionaries mirror locale/{en,zh}.json's ui section.
     // Kept inside the lazy factory so the Client needs no runtime package imports.
     const DICTIONARIES = {
@@ -186,6 +310,8 @@ window.__ModuleLoader__.load({
     "health.checking": "Checking public entry…",
     "health.reconnecting": "Reconnecting…",
     "health.offline": "Entry unavailable",
+    "health.degraded": "Entry check degraded",
+    "healthDegradedHint": "The SSH carrier is retained while public checks are retried; a failed probe does not interrupt active sessions.",
     "healthHint": "The entry is enabled but cannot currently reach this computer. Reconnection runs automatically.",
     "persistentHint": "Device grants are saved privately on this computer. A controlled reload preserves pairing; switching Off revokes all devices.",
     "phase.stopping": "Stopping…",
@@ -255,6 +381,8 @@ window.__ModuleLoader__.load({
     "health.checking": "正在确认公网入口…",
     "health.reconnecting": "正在重连…",
     "health.offline": "入口暂不可用",
+    "health.degraded": "入口检测暂时异常",
+    "healthDegradedHint": "正在重试公网检测，SSH 隧道保持连接；探针抖动不会打断当前会话。",
     "healthHint": "入口已启用，但暂时无法连接这台电脑，系统正在自动重连。",
     "persistentHint": "设备配对已私密保存于本机。正常重载保留配对，主动关闭入口会撤销全部设备。",
     "phase.stopping": "正在关闭…",
@@ -583,7 +711,7 @@ window.__ModuleLoader__.load({
       const phase = loaded ? (requestError && !snapshot.local ? 'error' : snapshot.phase) : 'loading';
       const health = snapshot.connection?.status;
       const healthPending = phase === 'on' && health && health !== 'online';
-      const phaseLabel = healthPending ? t(`health.${['checking', 'reconnecting'].includes(health) ? health : 'offline'}`) : t(`phase.${phase}`);
+      const phaseLabel = healthPending ? t(`health.${['checking', 'reconnecting', 'degraded'].includes(health) ? health : 'offline'}`) : t(`phase.${phase}`);
       const transitioning = snapshot.phase === 'starting' || snapshot.phase === 'stopping';
       const checked = snapshot.phase === 'on' || transitioning;
       const disabled = Boolean(busy) || !loaded || !snapshot.local || restricted || transitioning;
@@ -631,7 +759,7 @@ window.__ModuleLoader__.load({
           loaded && snapshot.local && !restricted && !snapshot.dependency.available ? h('div', { className: 'dsh-rc-copy' }, h('p', { className: 'dsh-rc-muted' }, t('dependencyMissing')), h('div', { className: 'dsh-rc-actions' }, button('retry', refresh))) : null,
           loaded && snapshot.local && !restricted && !displayError && snapshot.phase !== 'on' ? h('p', { className: 'dsh-rc-muted' }, t(snapshot.phase === 'starting' ? 'startingHint' : snapshot.phase === 'stopping' ? 'stoppingHint' : 'offHint')) : null),
         errorBlock,
-        healthPending && !restricted ? h('div', { className: 'dsh-rc-note', role: 'status' }, t('healthHint')) : null,
+        healthPending && !restricted ? h('div', { className: 'dsh-rc-note', role: 'status' }, t(health === 'degraded' ? 'healthDegradedHint' : 'healthHint')) : null,
         snapshot.persistent && !restricted ? h('p', { className: 'dsh-rc-muted' }, t('persistentHint')) : null,
         disconnected && !restricted ? h('div', { className: 'dsh-rc-note dsh-rc-copy', role: 'status' }, h('p', null, t('streamDisconnected')), h('div', { className: 'dsh-rc-actions' }, button('reconnect', refresh, { disabled: Boolean(busy) }))) : null,
         snapshot.phase === 'on' && !restricted ? h('div', { className: 'dsh-rc-card' },
@@ -677,7 +805,7 @@ window.__ModuleLoader__.load({
     }
 
     return {
-      inject: ['slots', 'locale'],
+      inject: ['slots', 'locale', 'connection'],
       apply(ctx) {
         ctx.effect(() => ctx.locale.register(NS, DICTIONARIES), 'dsh-remote-control: dictionaries');
         const t = ctx.locale.bind(NS);
@@ -716,9 +844,10 @@ window.__ModuleLoader__.load({
             name: 'shell.overlay', id: 'dsh-remote-control.credentials', order: 100, locale: NS,
           }, CredentialNotice));
           ctx.effect(() => {
+            let recovery;
             const renewer = createCredentialRenewer({
               fetch: (...args) => window.fetch(...args), window, document,
-              onState(next) { credentialState = next; for (const listener of listeners) listener(); },
+              onState(next) { credentialState = next; recovery?.notifyCredentialState(next); for (const listener of listeners) listener(); },
             });
             const probe = new AbortController();
             const timeout = setTimeout(() => probe.abort(), 10000);
@@ -726,9 +855,16 @@ window.__ModuleLoader__.load({
               .then(async response => {
                 if (!response.ok) return;
                 const marker = await response.json();
-                if (!probe.signal.aborted && marker?.ok === true && marker.service === 'dsh-remote-control') await renewer.start();
+                if (!probe.signal.aborted && marker?.ok === true && marker.service === 'dsh-remote-control') {
+                  clearTimeout(timeout);
+                  await renewer.start();
+                  if (!probe.signal.aborted) {
+                    recovery = createConnectionCredentialRecovery({ connection: ctx.connection, refresh: () => renewer.refresh() });
+                    recovery.start();
+                  }
+                }
               }).catch(() => {}).finally(() => clearTimeout(timeout));
-            return () => { probe.abort(); clearTimeout(timeout); renewer.dispose(); };
+            return () => { probe.abort(); clearTimeout(timeout); recovery?.dispose(); renewer.dispose(); };
           }, 'dsh-remote-control: browser credential renewal');
         }
       },

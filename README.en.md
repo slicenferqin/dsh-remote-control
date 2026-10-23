@@ -4,7 +4,7 @@
 
 Pair a phone browser with your running [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness). Continue the same sessions, send messages, answer questions, approve actions, and stop tasks from your phone. **DSH, project files, and provider configuration stay on the computer running DSH.**
 
-Version 0.3.0 offers two HTTPS entries: the default Cloudflare Quick Tunnel needs no Cloudflare account or custom domain; optional SSH mode uses a fixed domain and an HTTPS gateway you manage. Neither mode needs a phone app. Remote access starts off by default.
+Version 0.3.1 supports two HTTPS entries: the default Cloudflare Quick Tunnel needs no Cloudflare account or custom domain; optional SSH mode uses a fixed domain and an HTTPS gateway you manage. Neither mode needs a phone app. Remote access starts off by default.
 
 This is an independent community plugin. For the current full phone experience, also install [dsh-mobile](https://github.com/slicenferqin/dsh-mobile), which adds a task-first phone workspace. Either plugin can be installed independently.
 
@@ -46,7 +46,7 @@ The DSH computer initiates the outbound SSH connection. The server terminates HT
 ## Compatibility
 
 - Node.js **22.19 or later**, DSH installed, and `pnpm` on `PATH` for profile package management.
-- The declared DSH range remains **`>=0.2.1-rc.2 <0.3.0`**. Plugin version 0.3.0 does not require DSH 0.3.0. DSH plugin APIs are pre-stable; check compatibility before upgrading.
+- The declared DSH range remains **`>=0.2.1-rc.2 <0.3.0`**. Plugin version 0.3.1 does not require DSH 0.3.0. DSH plugin APIs are pre-stable; check compatibility before upgrading.
 - Validated with a **DSH 0.2.1-rc.2 source build on macOS arm64**, including live browser/tunnel use. This is not an end-to-end validation claim for every OS, browser, or mobile network.
 - The DSH Web origin must use **`localhost`, `127.0.0.1`, or `[::1]`**. The default `dsh web` listener uses `127.0.0.1`. LAN addresses and wildcard binds such as `0.0.0.0` or `[::]` are unsupported by this bridge.
 
@@ -55,7 +55,7 @@ The DSH computer initiates the outbound SSH connection. The server terminates HT
 Install the tagged community release into the Web profile:
 
 ```sh
-dsh plugin --profile web add github:slicenferqin/dsh-remote-control#v0.3.0
+dsh plugin --profile web add github:slicenferqin/dsh-remote-control#v0.3.1
 ```
 
 For the default Quick mode, install `cloudflared` on the computer running DSH:
@@ -119,7 +119,17 @@ The device store supports one writer; give each local instance a separate state 
 
 ## Health status
 
-Enabled does not mean publicly reachable. `connection.status` is `checking` during verification, `online` when the latest public probe reaches this bridge, `reconnecting` during a temporary failure and retry, or `offline` when the entry is offline or has an error needing attention. SSH reconnection retains valid pairings. Sleep, loss of connectivity, SSH errors, or certificate failures still interrupt access.
+Enabled intent, a running SSH process, and an established Core WebSocket are separate states. `connection.status` can be `checking`, `online`, `degraded`, `reconnecting`, or `offline`. `lastHealthyAt` records the most recent successful verification of this bridge, or `null` before the first success; it differs from the latest probe time, `checkedAt`.
+
+In 0.3.1, short public health failures no longer terminate an already verified SSH process. Three consecutive ordinary failures mark the entry `degraded`, preserving the transport and last successful time; malformed responses or a mismatched `entryId` degrade it immediately. Matching health restores `online`. Actual SSH exits and forwarding failures still reconnect. Retaining `online` and its historical success during a short failure does not mean the latest request succeeded. First startup still requires matching public health.
+
+### Connection recovery and bandwidth
+
+When Core remains reconnecting beyond a short grace period, the Client coalesces one credential-recovery request per outage and reuses the renewer's existing network retries. It nudges Core at most once, only after credentials are ready and Core is still reconnecting. It issues no reconnect after Core has recovered, credentials have expired, or the plugin is disposed. WebSocket, Host/Origin, and Cookie checks remain intact.
+
+For authenticated `GET /plugins/` static scripts/resources, the bridge can stream gzip level 1 **on the local computer before the SSH hop** when the browser accepts gzip, the upstream response is unencoded 200, and no Range was requested. Business APIs, JSON, SSE, WS, HEAD, Range, and already encoded responses pass through. Optional OpenSSH `Compression yes` also compresses SSH forwarding payloads, including large WS frames; it is independent of HTTP gzip and should be measured against CPU and network cost.
+
+Slow WAN deployments may also need larger Core heartbeat and generation-readiness budgets. Core defaults to a two-second WS heartbeat interval and a 15-second readiness timeout. These are Core settings; **this plugin does not change their defaults**. See the official [Connection documentation](https://github.com/deepseek-ai/deepseek-harness/blob/main/packages/client/connection/README.md#connection-generation) and [Gateway documentation](https://github.com/deepseek-ai/deepseek-harness/blob/main/packages/api/gateway/README.md). Sleep, network loss, and service failures still interrupt access.
 
 Public **`GET /__dsh_remote_health`** checks the exact Host/Origin, then responds before device authentication:
 

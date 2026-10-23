@@ -1,6 +1,8 @@
 import http from 'node:http'
 import https from 'node:https'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import { createGzip } from 'node:zlib'
+import { pipeline } from 'node:stream'
 import httpProxy from 'http-proxy'
 import { createPairingResumer } from './pairing-resume.js'
 import { normalizeRemoteOrigin, validateDeviceSnapshot } from './device-store.js'
@@ -15,6 +17,7 @@ const REFRESH_COOKIE = '__Host-dsh-remote-refresh'
 const DEVICE = Symbol('remote-device')
 const RENEWAL = Symbol('remote-renewal')
 const ACCESS_HASH = Symbol('remote-access-hash')
+const SELF_RESPONSE = Symbol('remote-plugin-response')
 const REFRESH_GRACE_MS = 120_000
 const MAX_TIMER = 2 ** 31 - 1
 const NO_STORE = {
@@ -140,6 +143,43 @@ function externalCookie(raw, expiresAt, time) {
 
 function deviceCookie(name, token, expiresAt, time) {
   return `${name}=${token}; Path=/; Max-Age=${Math.max(0, Math.ceil((expiresAt - time) / 1000))}; Expires=${new Date(expiresAt).toUTCString()}; Secure; HttpOnly; SameSite=Strict`
+}
+
+function acceptsGzip(value) {
+  if (typeof value !== 'string') return false
+  let gzip
+  let wildcard = 0
+  for (const part of value.split(',')) {
+    const [coding, ...parameters] = part.trim().toLowerCase().split(';').map(value => value.trim())
+    if (coding !== 'gzip' && coding !== '*') continue
+    let quality = 1
+    if (parameters.length) {
+      const weight = parameters.length === 1 && /^q=(0(?:\.\d{0,3})?|1(?:\.0{0,3})?)$/.exec(parameters[0])
+      quality = weight ? Number(weight[1]) : 0
+    }
+    if (coding === 'gzip') gzip = gzip === undefined ? quality : Math.min(gzip, quality)
+    else wildcard = quality
+  }
+  return (gzip ?? wildcard) > 0
+}
+
+function pluginResource(req, path) {
+  return req.method === 'GET' && path.startsWith('/plugins/') && req.headers.range === undefined
+}
+
+function compressiblePluginResponse(response) {
+  const type = (response.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase()
+  return response.statusCode === 200 && response.headers['content-encoding'] === undefined
+    && response.headers['content-range'] === undefined
+    && !/(?:^|,)\s*no-transform\s*(?:,|$)/i.test(response.headers['cache-control'] ?? '')
+    && /^(?:(?:application|text)\/(?:javascript|ecmascript|x-javascript)|text\/css|image\/svg\+xml)$/.test(type)
+}
+
+function varyEncoding(headers) {
+  const value = [].concat(headers.vary ?? []).join(', ')
+  if (!value.split(',').some(field => ['*', 'accept-encoding'].includes(field.trim().toLowerCase()))) {
+    headers.vary = value ? `${value}, Accept-Encoding` : 'Accept-Encoding'
+  }
 }
 
 function mergeCookies(...groups) {
@@ -693,7 +733,7 @@ export async function createRemoteBridge({
   }
 
   proxy.on('proxyReq', (request, req) => trackDevice(req[DEVICE], request))
-  proxy.on('proxyRes', (response, req) => {
+  proxy.on('proxyRes', (response, req, res) => {
     const device = req[DEVICE]
     trackDevice(device, response)
     if (closed || device.revoked || device.expiresAt <= now()) return response.destroy()
@@ -712,6 +752,35 @@ export async function createRemoteBridge({
         if (destination.origin === upstream.origin) response.headers.location = `${external.origin}${destination.pathname}${destination.search}${destination.hash}`
       } catch { delete response.headers.location }
     }
+    const compressible = req[SELF_RESPONSE] !== undefined && compressiblePluginResponse(response)
+    if (compressible) varyEncoding(response.headers)
+    if (!req[SELF_RESPONSE]) return
+
+    let encoder
+    if (compressible) {
+      encoder = createGzip({ level: 1 })
+      trackDevice(device, encoder)
+      response.headers['content-encoding'] = 'gzip'
+      for (const name of ['content-length', 'transfer-encoding', 'etag', 'content-md5', 'content-digest', 'accept-ranges']) {
+        delete response.headers[name]
+      }
+    }
+    // selfHandleResponse skips http-proxy's outgoing passes. Keep its HTTP
+    // version/connection behavior, then write the already-rewritten headers once.
+    if (req.httpVersion === '1.0') {
+      delete response.headers['transfer-encoding']
+      response.headers.connection = req.headers.connection || 'close'
+    } else if (req.httpVersion !== '2.0' && !response.headers.connection) {
+      response.headers.connection = req.headers.connection || 'keep-alive'
+    }
+    res.statusCode = response.statusCode
+    if (response.statusMessage) res.statusMessage = response.statusMessage
+    for (const [name, value] of Object.entries(response.headers)) if (value !== undefined) res.setHeader(name, value)
+    res.writeHead(res.statusCode)
+    // pipeline propagates cancellation/errors in both directions. All three
+    // streams are also device-owned, so revoke/expiry/close interrupts encoding.
+    if (encoder) pipeline(response, encoder, res, () => {})
+    else pipeline(response, res, () => {})
   })
   proxy.on('proxyReqWs', (request, req) => {
     trackDevice(req[DEVICE], request)
@@ -755,8 +824,9 @@ export async function createRemoteBridge({
       req[ACCESS_HASH] = device.hash
       trackDevice(device, res)
       if (path === DEVICE_PATH) { await manageDevice(req, res, device); return }
+      if (pluginResource(req, path)) req[SELF_RESPONSE] = acceptsGzip(req.headers['accept-encoding'])
       rewriteRequest(req)
-      proxy.web(req, res)
+      proxy.web(req, res, { selfHandleResponse: req[SELF_RESPONSE] === true })
     }).catch(error => {
       if (error instanceof RequestError && error.status === 401 && req.method === 'GET' && req.url === '/'
         && req.headers['sec-fetch-mode'] === 'navigate' && req.headers['sec-fetch-dest'] === 'document'

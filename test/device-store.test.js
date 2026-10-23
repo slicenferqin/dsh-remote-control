@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path'
 import { createDeviceStore } from '../src/device-store.js'
 
 const FAILURE = /^Error: Remote device store is unavailable$/
-const ORIGIN = 'https://clawplay.club'
+const ORIGIN = 'https://example.com'
 const registry = () => ({ version: 1, origin: ORIGIN, devices: [{
   id: '60e390ab-e3b5-4a47-9ed1-096fd2545783', label: 'My phone',
   pairedAt: 1_700_000_000_000, lastSeenAt: 1_700_000_001_000,
@@ -55,9 +55,9 @@ test('bad JSON, unknown fields, malformed origins, hashes and timestamps fail cl
   const mutations = [
     value => { value.version = 2 },
     value => { value.enabled = 'true' },
-    value => { value.origin = 'https://user@clawplay.club' },
-    value => { value.origin = 'https://clawplay.club/path' },
-    value => { value.origin = 'https://clawplay.club:444' },
+    value => { value.origin = 'https://user@example.com' },
+    value => { value.origin = 'https://example.com/path' },
+    value => { value.origin = 'https://example.com:444' },
     value => { value.origin = null },
     value => { value.rawRefresh = 'private-refresh-credential' },
     value => { value.devices[0].token = 'private-credential' },

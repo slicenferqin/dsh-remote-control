@@ -1,6 +1,6 @@
 {
   "name": "dsh-remote-control",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Secure browser remote control for local DSH through temporary or fixed HTTPS entry.",
   "license": "MIT",
   "repository": {
@@ -49,7 +49,7 @@
   ],
   "scripts": {
     "build": "node build-client.js",
-    "check": "node --check index.js && node --check client.js && node --check src/bridge.js && node --check src/tunnel.js && node --check src/controller.js && node --check src/renewal.js && node --check src/pairing-resume.js && node --check src/device-store.js && node --check src/ssh-tunnel.js && node --check build-client.js && node --check scripts/verify-package.mjs",
+    "check": "node --check index.js && node --check client.js && node --check src/bridge.js && node --check src/tunnel.js && node --check src/controller.js && node --check src/renewal.js && node --check src/connection-recovery.js && node --check src/pairing-resume.js && node --check src/device-store.js && node --check src/ssh-tunnel.js && node --check build-client.js && node --check scripts/verify-package.mjs",
     "test": "node --test test/*.test.js",
     "verify:package": "node scripts/verify-package.mjs"
   },
@@ -67,7 +67,8 @@
       "immediately": true,
       "inject": [
         "@deepseek-ai/dsh-client-ui-settings",
-        "@deepseek-ai/dsh-client-locale"
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-connection"
       ]
     }
   }

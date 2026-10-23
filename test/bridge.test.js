@@ -10,6 +10,7 @@ import { createDeviceStore } from '../src/device-store.js'
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
+import { gzipSync, gunzipSync } from 'node:zlib'
 
 const PUBLIC = 'https://amber-quiet-river-cloud.trycloudflare.com'
 const HOST = new URL(PUBLIC).host
@@ -41,7 +42,10 @@ function request(origin, path = '/', { method = 'GET', headers = {}, body } = {}
       const chunks = []
       res.on('data', chunk => chunks.push(chunk))
       res.on('error', reject)
-      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString() }))
+      res.on('end', () => {
+        const bytes = Buffer.concat(chunks)
+        resolve({ status: res.statusCode, headers: res.headers, body: bytes.toString(), bytes })
+      })
     })
     req.on('error', reject)
     req.end(body)
@@ -186,6 +190,22 @@ async function fixture(t, options = {}) {
     }
     if (!trusted(req)) { res.writeHead(401); res.end('upstream authentication required'); return }
     seen.push({ url: req.url, headers: req.headers })
+    if (state.resource && (url.pathname.startsWith('/plugins/') || ['/ordinary.js', '/api/resource'].includes(url.pathname))) {
+      const resource = state.resource
+      const body = Buffer.from(resource.body)
+      res.writeHead(resource.status ?? 200, {
+        'content-type': resource.type ?? 'application/javascript; charset=utf-8',
+        ...(resource.hold ? {} : { 'content-length': body.length }),
+        ...(state.upstreamCookies.length ? { 'set-cookie': state.upstreamCookies } : {}),
+        ...resource.headers,
+      })
+      if (resource.hold) {
+        state.resourceStreams ??= []
+        state.resourceStreams.push(res)
+        res.write(body)
+      } else res.end(body)
+      return
+    }
     if (url.pathname === '/events') {
       sse.push(res)
       res.writeHead(200, { 'content-type': 'text/event-stream' })
@@ -261,6 +281,129 @@ async function fixture(t, options = {}) {
   return { bridge, restart, target, state, seen, sse, events, sockets }
 }
 
+const PLUGIN_SCRIPT = 'window.examplePlugin = (() => ({ label: "repeatable plugin resource", value: 42 }))();\n'.repeat(12000)
+
+test('plugin JS is gzipped before transport with correct bytes, ratio and rewritten headers', { timeout: 5000 }, async t => {
+  let time = Date.now()
+  const { bridge, state, target, seen } = await fixture(t, { now: () => time })
+  const cookie = await pair(bridge)
+  state.resource = { body: PLUGIN_SCRIPT, headers: { etag: '"strong-original"', vary: 'Origin',
+    'content-md5': 'original-digest', 'content-digest': 'original-digest', 'accept-ranges': 'bytes', location: `${target}/sessions/abc` } }
+  state.upstreamCookies = ['theme=dark; Domain=localhost; Path=/; SameSite=Lax']
+  time += 8 * HOUR + 1
+  const result = await request(bridge.origin, '/plugins/combined.js?modules=a,b', { headers: { cookie, 'accept-encoding': 'gzip, br' } })
+  assert.equal(result.status, 200)
+  assert.equal(result.headers['content-encoding'], 'gzip')
+  assert.equal(gunzipSync(result.bytes).toString(), PLUGIN_SCRIPT)
+  assert.ok(result.bytes.length < Buffer.byteLength(PLUGIN_SCRIPT) / 10)
+  for (const header of ['content-length', 'etag', 'content-md5', 'content-digest', 'accept-ranges']) assert.equal(result.headers[header], undefined)
+  assert.equal(result.headers.vary, 'Origin, Accept-Encoding')
+  assert.equal(result.headers.location, `${PUBLIC}/sessions/abc`)
+  assert.match(result.headers['set-cookie'][0], /Secure; HttpOnly; SameSite=Strict/)
+  assert.doesNotMatch(result.headers['set-cookie'][0], /Domain=/i)
+  assert.equal(seen.at(-1).headers.cookie, AUTH)
+  assert.equal(state.exchanges, 2)
+  assert.equal(result.headers['set-cookie'].length, 4)
+  const confirmed = await request(bridge.origin, '/__dsh_remote_device', {
+    headers: { cookie: cookieHeader(result), 'x-dsh-remote-confirm': '1' },
+  })
+  assert.equal(confirmed.status, 200)
+})
+
+test('plugin compression honors gzip quality and varies identity responses without altering their bytes', { timeout: 5000 }, async t => {
+  const { bridge, state } = await fixture(t)
+  const cookie = await pair(bridge)
+  state.resource = { body: PLUGIN_SCRIPT, headers: { etag: '"identity"', vary: 'Origin' } }
+  for (const [encoding, compressed] of [[undefined, false], ['br', false], ['identity', false], ['gzip;q=0', false],
+    ['*;q=1, gzip;q=0', false], ['gzip;q=bogus, *', false], ['gzip;q=0.2', true], ['GZip ; q=1.000, br', true], ['*', true]]) {
+    const result = await request(bridge.origin, '/plugins/combined.js', { headers: { cookie, 'accept-encoding': encoding } })
+    assert.equal(result.headers['content-encoding'], compressed ? 'gzip' : undefined, encoding)
+    assert.equal((compressed ? gunzipSync(result.bytes) : result.bytes).toString(), PLUGIN_SCRIPT)
+    assert.equal(result.headers.vary, 'Origin, Accept-Encoding')
+    if (!compressed) {
+      assert.equal(Number(result.headers['content-length']), Buffer.byteLength(PLUGIN_SCRIPT))
+      assert.equal(result.headers.etag, '"identity"')
+    }
+  }
+  for (const vary of ['*', 'accept-encoding, Origin']) {
+    state.resource.headers.vary = vary
+    const result = await request(bridge.origin, '/plugins/combined.js', { headers: { cookie, 'accept-encoding': 'gzip' } })
+    assert.equal(result.headers.vary, vary)
+  }
+})
+
+test('compression leaves JSON, SSE, non-plugin, HEAD, range, error and encoded responses unchanged', { timeout: 5000 }, async t => {
+  const { bridge, state, target } = await fixture(t)
+  const cookie = await pair(bridge)
+  const cases = [
+    { type: 'application/json', body: '{"business":"data"}' },
+    { type: 'text/event-stream', body: 'data: hello\n\n' },
+    { type: 'text/html', body: '<html>unchanged</html>' },
+    { type: 'image/png', body: Buffer.from([137, 80, 78, 71, 0, 1, 2]) },
+    { path: '/api/resource' }, { path: '/ordinary.js' }, { method: 'POST' }, { method: 'HEAD' },
+    { requestHeaders: { range: 'bytes=0-15' } },
+    { status: 206, headers: { 'content-range': 'bytes 0-15/100' }, body: '0123456789abcdef' },
+    { status: 401 }, { status: 404 }, { status: 500 }, { status: 304 },
+    { status: 302, headers: { location: `${target}/sessions/abc` } },
+    { headers: { 'cache-control': 'public, no-transform' } },
+    { headers: { 'content-encoding': 'gzip' }, body: gzipSync(PLUGIN_SCRIPT) },
+  ]
+  for (const example of cases) {
+    state.resource = { body: PLUGIN_SCRIPT, ...example }
+    const expected = Buffer.from(state.resource.body)
+    const result = await request(bridge.origin, example.path ?? '/plugins/combined.js', {
+      method: example.method, headers: { cookie, 'accept-encoding': 'gzip', ...example.requestHeaders },
+    })
+    assert.equal(result.status, example.status ?? 200)
+    assert.equal(result.headers['content-encoding'], example.headers?.['content-encoding'])
+    assert.deepEqual(result.bytes, example.method === 'HEAD' || example.status === 304 ? Buffer.alloc(0) : expected)
+    assert.equal(Number(result.headers['content-length']), expected.length)
+    if (example.status === 302) assert.equal(result.headers.location, `${PUBLIC}/sessions/abc`)
+    if (example.headers?.['content-encoding']) assert.equal(gunzipSync(result.bytes).toString(), PLUGIN_SCRIPT)
+  }
+})
+
+test('gzip plugin streams stop with revoke, expiry, close and client cancellation', { timeout: 5000 }, async t => {
+  for (const operation of ['revoke', 'expiry', 'close', 'client']) await t.test(operation, async t => {
+    let time = Date.now()
+    const { bridge, state } = await fixture(t, { now: () => time })
+    const cookie = await pair(bridge)
+    state.resource = { body: PLUGIN_SCRIPT, hold: true }
+    const downstream = await new Promise((resolve, reject) => {
+      const req = http.get(bridge.origin, { path: '/plugins/stream.js', agent: false,
+        headers: { host: HOST, origin: PUBLIC, cookie, 'accept-encoding': 'gzip' } }, res => {
+        res.on('error', () => {})
+        res.once('data', () => resolve(res))
+      })
+      req.once('error', reject)
+    })
+    assert.equal(downstream.headers['content-encoding'], 'gzip')
+    const stopped = Promise.all([new Promise(resolve => downstream.once('close', resolve)),
+      new Promise(resolve => state.resourceStreams[0].once('close', resolve))])
+    if (operation === 'revoke') bridge.revokeDevice(bridge.snapshot().devices[0].id)
+    if (operation === 'expiry') { time += 8 * HOUR + 1; bridge.snapshot() }
+    if (operation === 'close') await bridge.close()
+    if (operation === 'client') downstream.destroy()
+    await stopped
+  })
+})
+
+test('plugin compression does not bypass authentication or alter WebSocket framing', { timeout: 5000 }, async t => {
+  const { bridge, state, seen } = await fixture(t)
+  state.resource = { body: PLUGIN_SCRIPT }
+  const rejected = await request(bridge.origin, '/plugins/combined.js', { headers: { 'accept-encoding': 'gzip' } })
+  assert.equal(rejected.status, 401)
+  assert.equal(rejected.headers['content-encoding'], undefined)
+  assert.equal(seen.length, 0)
+  const cookie = await pair(bridge)
+  assert.equal((await request(bridge.origin, '/plugins/combined.js', { headers: { cookie, host: 'other.example', 'accept-encoding': 'gzip' } })).status, 403)
+  const ws = await upgraded(bridge.origin, { cookie, path: '/plugins/ws', headers: { 'accept-encoding': 'gzip' } })
+  assert.equal(ws.status, 101)
+  const echoed = once(ws.socket, 'data')
+  ws.socket.write(maskedText('unchanged'))
+  assert.equal((await echoed)[0].subarray(2).toString(), 'unchanged')
+})
+
 test('restricts public origins and redirect paths and binds only to loopback', { timeout: 5000 }, async t => {
   const { bridge, target } = await fixture(t)
   assert.equal(new URL(bridge.origin).hostname, '127.0.0.1')
@@ -269,7 +412,7 @@ test('restricts public origins and redirect paths and binds only to loopback', {
     'https://bad_host.example', 'https://a.example/#', 'https://a.example/a/..', 'https://a.example\\x', 'https://a.example?']) {
     assert.throws(() => bridge.setExternalOrigin(origin), /HTTPS origin/)
   }
-  for (const origin of ['https://clawplay.club', 'https://entry.clawplay.club:443/', 'https://a.b.trycloudflare.com']) {
+  for (const origin of ['https://example.com', 'https://entry.example.com:443/', 'https://a.b.trycloudflare.com']) {
     bridge.setExternalOrigin(origin)
     assert.equal(bridge.snapshot().externalOrigin, new URL(origin).origin)
   }
@@ -1066,7 +1209,7 @@ test('expired persisted refresh grants are removed and changing domains never mi
     const { bridge, restart } = await fixture(t, { deviceStore, afterClose, now: () => time })
     const cookie = await pair(bridge)
     if (operation === 'expiry') time += 10 * DAY
-    const domain = operation === 'domain' ? 'https://clawplay.club' : PUBLIC
+    const domain = operation === 'domain' ? 'https://example.com' : PUBLIC
     const next = await restart({ deviceStore: createDeviceStore(path), externalOrigin: domain })
     assert.deepEqual(next.snapshot().devices, [])
     assert.deepEqual(createDeviceStore(path).load().devices, [])

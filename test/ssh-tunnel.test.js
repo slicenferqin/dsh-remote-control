@@ -6,9 +6,10 @@ import { startSshTunnel, checkSsh } from '../src/ssh-tunnel.js';
 
 const HEALTH = { ok: true, service: 'dsh-remote-control', entryId: 'local-entry' };
 const flush = async () => { for (let index = 0; index < 30; index++) await Promise.resolve(); };
+let nextFakePid = 12345;
 function fakeChild({ ignoreTerm = false, autoClose = true } = {}) {
   const child = new EventEmitter();
-  child.pid = 12345;
+  child.pid = nextFakePid++;
   child.stderr = new PassThrough();
   child.kills = [];
   child.kill = signal => {
@@ -27,7 +28,7 @@ function harness(extra = {}) {
   const health = [];
   let onExitCalls = 0;
   const starting = startSshTunnel({ target: 'restricted-vps', configPath: '/private/test/config',
-    origin: 'http://127.0.0.1:45678', publicUrl: 'https://dsh.clawplay.club', remotePort: 4567,
+    origin: 'http://127.0.0.1:45678', publicUrl: 'https://dsh.example.com', remotePort: 4567,
     expectedEntryId: 'local-entry', timeoutMs: 10000,
     spawnProcess() { const child = fakeChild(); children.push(child); return child; },
     probe: async () => HEALTH, onHealth: value => health.push(value), onExit: () => { onExitCalls++; }, ...extra });
@@ -47,7 +48,7 @@ test('SSH args restrict forwarding and readiness requires the owned forwarding A
   const run = harness({ spawnProcess(...args) { invocation = args; return child; },
     probe: async (url, options) => {
       probes++;
-      assert.equal(url, 'https://dsh.clawplay.club/__dsh_remote_health');
+      assert.equal(url, 'https://dsh.example.com/__dsh_remote_health');
       assert.equal(options.expectedEntryId, 'local-entry');
       assert.equal(options.timeoutMs, 5000);
       return HEALTH;
@@ -67,7 +68,7 @@ test('SSH args restrict forwarding and readiness requires the owned forwarding A
   child.stderr.write('ess for: listen 127.0.0.1:4567\n');
   const tunnel = await run.starting;
   assert.equal(probes, 1);
-  assert.equal(tunnel.publicUrl, 'https://dsh.clawplay.club');
+  assert.equal(tunnel.publicUrl, 'https://dsh.example.com');
   assert.equal(tunnel.getHealth().status, 'online');
   await tunnel.stop();
   await tunnel.stop();
@@ -77,8 +78,8 @@ test('SSH args restrict forwarding and readiness requires the owned forwarding A
 test('invalid targets and non-loopback or insecure URLs never allocate a process', async () => {
   for (const config of [{ target: '-oProxyCommand=bad' }, { target: 'host;echo bad' },
     { target: 'host\n-oForwardAgent=yes' }, { target: 'user@-host' }, { origin: 'http://192.168.1.2:4000' },
-    { publicUrl: 'http://dsh.clawplay.club' }, { publicUrl: 'https://user:secret@dsh.clawplay.club' },
-    { publicUrl: 'https://dsh.clawplay.club/other' }, { remotePort: 0 }, { expectedEntryId: '' }]) {
+    { publicUrl: 'http://dsh.example.com' }, { publicUrl: 'https://user:secret@dsh.example.com' },
+    { publicUrl: 'https://dsh.example.com/other' }, { remotePort: 0 }, { expectedEntryId: '' }]) {
     let spawned = false;
     const run = harness({ ...config, spawnProcess() { spawned = true; } });
     await assert.rejects(run.starting, { code: 'SSH_CONFIG_INVALID' });
@@ -228,43 +229,141 @@ test('retry backoff grows from one second and caps at thirty seconds', async con
   await run.tunnel.stop();
 });
 
-test('periodic public probe detects an unhealthy live SSH connection and reconnects', async context => {
+test('short public probe failures preserve the verified SSH process, online status, and lastHealthyAt', async context => {
   clock(context);
   let healthy = true;
   const run = await connected({ probe: async () => {
     if (!healthy) throw new Error('secret network details /private/key');
     return HEALTH;
   } });
+  const child = run.children[0];
+  const pid = child.pid;
+  const lastHealthyAt = run.tunnel.getHealth().lastHealthyAt;
+  assert.equal(lastHealthyAt, Date.now());
   healthy = false;
+  for (let index = 0; index < 2; index++) {
+    context.mock.timers.tick(5000);
+    await flush();
+    const health = run.tunnel.getHealth();
+    assert.equal(health.status, 'online');
+    assert.equal(health.error.code, 'SSH_HEALTH_UNREACHABLE');
+    assert.equal(health.lastHealthyAt, lastHealthyAt);
+    assert.ok(health.checkedAt > health.lastHealthyAt);
+    assert.equal(health.retryAt, undefined);
+    assert.deepEqual(child.kills, []);
+    assert.equal(run.children.length, 1);
+    assert.equal(run.children[0].pid, pid);
+  }
+  assert.equal(JSON.stringify(run.health).includes('/private/key'), false);
+  healthy = true;
   context.mock.timers.tick(5000);
   await flush();
-  assert.deepEqual(run.children[0].kills, ['SIGTERM']);
-  assert.equal(run.tunnel.getHealth().error.code, 'SSH_HEALTH_UNREACHABLE');
-  assert.equal(JSON.stringify(run.health).includes('/private/key'), false);
-  context.mock.timers.tick(1000);
-  await flush();
-  healthy = true;
-  acknowledge(run.children[1]);
-  await flush();
   assert.equal(run.tunnel.getHealth().status, 'online');
+  assert.equal(run.tunnel.getHealth().lastHealthyAt, Date.now());
+  assert.equal(run.tunnel.getHealth().error, undefined);
+  assert.equal(run.children[0], child);
+  assert.deepEqual(child.kills, []);
   await run.tunnel.stop();
 });
 
-test('a periodic probe has a wall timeout even if an injected implementation ignores abort', async context => {
+test('three consecutive public failures degrade the same SSH process and matching health resets the count', async context => {
+  clock(context);
+  let healthy = true;
+  const run = await connected({ probe: async () => {
+    if (!healthy) throw new Error('temporary DNS or TLS failure');
+    return HEALTH;
+  } });
+  const child = run.children[0];
+  const lastHealthyAt = run.tunnel.getHealth().lastHealthyAt;
+  healthy = false;
+  for (const expectedStatus of ['online', 'online', 'degraded', 'degraded', 'degraded']) {
+    context.mock.timers.tick(5000);
+    await flush();
+    assert.equal(run.tunnel.getHealth().status, expectedStatus);
+    assert.equal(run.tunnel.getHealth().lastHealthyAt, lastHealthyAt);
+    assert.deepEqual(child.kills, []);
+    assert.equal(run.children.length, 1);
+  }
+  healthy = true;
+  context.mock.timers.tick(5000);
+  await flush();
+  const recoveredAt = Date.now();
+  assert.equal(run.tunnel.getHealth().status, 'online');
+  assert.equal(run.tunnel.getHealth().lastHealthyAt, recoveredAt);
+  assert.equal(run.tunnel.getHealth().error, undefined);
+  healthy = false;
+  for (const expectedStatus of ['online', 'online', 'degraded']) {
+    context.mock.timers.tick(5000);
+    await flush();
+    assert.equal(run.tunnel.getHealth().status, expectedStatus);
+    assert.equal(run.tunnel.getHealth().lastHealthyAt, recoveredAt);
+  }
+  assert.equal(run.children[0], child);
+  assert.deepEqual(child.kills, []);
+  assert.equal(run.onExitCalls, 0);
+  await run.tunnel.stop();
+});
+
+test('entry mismatch immediately degrades without killing SSH and cannot return online until health matches', async context => {
+  clock(context);
+  let response = HEALTH;
+  let unreachable = false;
+  const run = await connected({ probe: async () => {
+    if (unreachable) throw new Error('temporary outage');
+    return response;
+  } });
+  const child = run.children[0];
+  const lastHealthyAt = run.tunnel.getHealth().lastHealthyAt;
+  response = { ...HEALTH, entryId: 'another-entry' };
+  context.mock.timers.tick(5000);
+  await flush();
+  assert.equal(run.tunnel.getHealth().status, 'degraded');
+  assert.equal(run.tunnel.getHealth().error.code, 'SSH_HEALTH_ENTRY_MISMATCH');
+  assert.equal(run.tunnel.getHealth().lastHealthyAt, lastHealthyAt);
+  unreachable = true;
+  context.mock.timers.tick(5000);
+  await flush();
+  assert.equal(run.tunnel.getHealth().status, 'degraded');
+  assert.equal(run.tunnel.getHealth().lastHealthyAt, lastHealthyAt);
+  response = HEALTH;
+  unreachable = false;
+  context.mock.timers.tick(5000);
+  await flush();
+  assert.equal(run.tunnel.getHealth().status, 'online');
+  assert.equal(run.tunnel.getHealth().lastHealthyAt, Date.now());
+  response = { ...HEALTH, service: 'unrelated-service' };
+  context.mock.timers.tick(5000);
+  await flush();
+  assert.equal(run.tunnel.getHealth().status, 'degraded');
+  assert.equal(run.tunnel.getHealth().error.code, 'SSH_HEALTH_INVALID');
+  assert.deepEqual(child.kills, []);
+  assert.equal(run.children.length, 1);
+  await run.tunnel.stop();
+});
+
+test('periodic probe wall timeouts cancel uncooperative probes and degrade without restarting SSH', async context => {
   clock(context);
   let probes = 0;
-  let signal;
+  const signals = [];
   const run = await connected({ probe: (url, options) => {
     if (++probes === 1) return HEALTH;
-    signal = options.signal;
+    signals.push(options.signal);
     return new Promise(() => {});
   } });
-  context.mock.timers.tick(5000);
-  await flush();
-  context.mock.timers.tick(5000);
-  await flush();
-  assert.equal(signal.aborted, true);
-  assert.equal(run.tunnel.getHealth().error.code, 'SSH_HEALTH_TIMEOUT');
+  const lastHealthyAt = run.tunnel.getHealth().lastHealthyAt;
+  for (const expectedStatus of ['online', 'online', 'degraded']) {
+    context.mock.timers.tick(5000);
+    await flush();
+    context.mock.timers.tick(5000);
+    await flush();
+    assert.equal(signals.at(-1).aborted, true);
+    assert.equal(run.tunnel.getHealth().status, expectedStatus);
+    assert.equal(run.tunnel.getHealth().error.code, 'SSH_HEALTH_TIMEOUT');
+    assert.equal(run.tunnel.getHealth().lastHealthyAt, lastHealthyAt);
+    assert.equal(run.children.length, 1);
+    assert.deepEqual(run.children[0].kills, []);
+  }
+  assert.equal(signals.length, 3);
   await run.tunnel.stop();
 });
 
@@ -366,6 +465,105 @@ test('stop is reentrant when an offline observer calls stop again', async () => 
   assert.equal(reentrant, stopping);
   await stopping;
   assert.deepEqual(run.children[0].kills, ['SIGTERM']);
+});
+
+test('a degraded connection still retries a genuine child exit and verifies its replacement', async context => {
+  clock(context);
+  let healthy = true;
+  const run = await connected({ probe: async () => {
+    if (!healthy) throw new Error('public probe failed');
+    return HEALTH;
+  } });
+  healthy = false;
+  for (let index = 0; index < 3; index++) {
+    context.mock.timers.tick(5000);
+    await flush();
+  }
+  const firstChild = run.children[0];
+  assert.equal(run.tunnel.getHealth().status, 'degraded');
+  assert.deepEqual(firstChild.kills, []);
+  firstChild.emit('close', 255, null);
+  await flush();
+  assert.equal(run.tunnel.getHealth().status, 'reconnecting');
+  assert.equal(run.tunnel.getHealth().error.code, 'SSH_EXITED');
+  assert.equal(run.tunnel.getHealth().retryAt - Date.now(), 1000);
+  context.mock.timers.tick(1000);
+  await flush();
+  assert.equal(run.children.length, 2);
+  assert.notEqual(run.children[1].pid, firstChild.pid);
+  healthy = true;
+  acknowledge(run.children[1]);
+  await flush();
+  assert.equal(run.tunnel.getHealth().status, 'online');
+  assert.equal(run.tunnel.getHealth().lastHealthyAt, Date.now());
+  assert.equal(run.onExitCalls, 0);
+  await run.tunnel.stop();
+});
+
+test('a reconnect forwarding ACK prevents deadline kills throughout a long public health outage', async context => {
+  clock(context);
+  let healthy = true;
+  const run = await connected({ timeoutMs: 60000, probe: async () => {
+    if (!healthy) throw new Error('DNS or TLS temporarily unavailable');
+    return HEALTH;
+  } });
+  const previousHealthyAt = run.tunnel.getHealth().lastHealthyAt;
+  run.children[0].emit('close', 255, null);
+  await flush();
+  context.mock.timers.tick(1000);
+  await flush();
+  assert.equal(run.children.length, 2);
+  const replacement = run.children[1];
+  const replacementPid = replacement.pid;
+  const sinceAck = run.health.length;
+  healthy = false;
+  acknowledge(replacement);
+  await flush();
+  assert.equal(run.tunnel.getHealth().status, 'reconnecting');
+  assert.equal(run.tunnel.getHealth().lastHealthyAt, previousHealthyAt);
+  for (let index = 0; index < 14; index++) {
+    context.mock.timers.tick(5000);
+    await flush();
+    assert.deepEqual(replacement.kills, []);
+    assert.equal(run.children.length, 2);
+  }
+  assert.equal(run.tunnel.getHealth().status, 'degraded');
+  assert.equal(run.tunnel.getHealth().lastHealthyAt, previousHealthyAt);
+  assert.equal(run.tunnel.getHealth().error.code, 'SSH_HEALTH_UNREACHABLE');
+  assert.equal(run.health.slice(sinceAck).some(value => value.status === 'online'), false);
+  healthy = true;
+  context.mock.timers.tick(5000);
+  await flush();
+  assert.equal(run.tunnel.getHealth().status, 'online');
+  assert.equal(run.tunnel.getHealth().lastHealthyAt, Date.now());
+  assert.equal(run.children[1], replacement);
+  assert.equal(run.children[1].pid, replacementPid);
+  assert.deepEqual(replacement.kills, []);
+  await run.tunnel.stop();
+});
+
+test('an explicit forwarding failure still restarts a degraded SSH transport', async context => {
+  clock(context);
+  let healthy = true;
+  const run = await connected({ probe: async () => {
+    if (!healthy) throw new Error('public probe failed');
+    return HEALTH;
+  } });
+  healthy = false;
+  for (let index = 0; index < 3; index++) {
+    context.mock.timers.tick(5000);
+    await flush();
+  }
+  assert.equal(run.tunnel.getHealth().status, 'degraded');
+  run.children[0].stderr.write('debug1: remote forward failure for: listen port 4567\n');
+  await flush();
+  assert.deepEqual(run.children[0].kills, ['SIGTERM']);
+  assert.equal(run.tunnel.getHealth().status, 'reconnecting');
+  assert.equal(run.tunnel.getHealth().error.code, 'SSH_FORWARD_FAILED');
+  context.mock.timers.tick(1000);
+  await flush();
+  assert.equal(run.children.length, 2);
+  await run.tunnel.stop();
 });
 
 test('a reconnect attempt that never acknowledges its forward times out and retries', async context => {

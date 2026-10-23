@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.1
+
+- Preserve a verified live SSH process through short public health failures. Three consecutive ordinary failures mark the entry degraded with `lastHealthyAt`; malformed or mismatched entry responses degrade immediately. Matching health restores online status, while real SSH exits and forwarding failures still reconnect.
+- Add bounded Core-loss credential recovery: coalesce one refresh per outage, reuse the existing renewer's network retries, and nudge Core at most once only while it remains connecting. Self-recovered active streams, expired credentials, and disposed Clients are not interrupted by late recovery results.
+- Stream gzip level 1 for eligible authenticated `GET /plugins/` static scripts/resources before the SSH hop. Preserve identity negotiation, existing encodings, range/error/HEAD behavior, Cookie and redirect rewriting, and stream revocation; business API, JSON, SSE, and WS traffic remain outside HTTP compression.
+- Show degraded health separately from reconnection and expose the last successful public verification time. Include the self-contained recovery helper and its build source/tests in the release package.
+- Document optional SSH payload compression and deployment-specific Core WAN budgets. The public plugin does not change Core's default heartbeat/readiness timings or move DSH, provider configuration, or projects to a relay.
+- Keep the DSH compatibility range `>=0.2.1-rc.2 <0.3.0`, local-user enable/pair controls, exact authority checks, persistent Off/revocation semantics, and Strict HttpOnly cookies unchanged. Use reserved example domains in test fixtures.
+
 ## 0.3.0
 
 - Add optional fixed-domain HTTPS access through a restricted SSH reverse tunnel and a user-managed TLS gateway. Cloudflare Quick Tunnel remains the default; DSH, projects, and provider configuration stay local.

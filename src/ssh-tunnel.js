@@ -4,6 +4,7 @@ import { RemoteControlError } from './tunnel.js';
 
 const HEALTH_TIMEOUT = 5000;
 const HEALTH_INTERVAL = 5000;
+const HEALTH_FAILURE_THRESHOLD = 3;
 const STARTUP_POLL_INTERVAL = 500;
 const messages = {
   CANCELLED: 'Remote access startup was cancelled.',
@@ -124,10 +125,12 @@ export async function checkSsh(binary = 'ssh', timeoutMs = 3000, spawnProcess = 
 
 /**
  * Own one SSH connection at a time. First readiness needs this connection's forwarding ACK
- * and matching public health. Once ready, failures are reported through onHealth and retried;
+ * and matching public health. Once ready, public health failures degrade status while
+ * preserving the live transport; SSH transport failures are retried through onHealth.
  * onExit is deliberately not called for recoverable child exits (the bridge remains owned).
  * probe(url, { signal, timeoutMs, expectedEntryId }) may return the health JSON or a Response.
- * checkedAt/retryAt are Unix milliseconds. stop() is idempotent and joins owned children.
+ * checkedAt/retryAt/lastHealthyAt are Unix milliseconds (lastHealthyAt is null until verified).
+ * stop() is idempotent and joins owned children.
  */
 export async function startSshTunnel({ binary = 'ssh', target, configPath, origin, publicUrl,
   remotePort, expectedEntryId, timeoutMs = 30000, signal, onExit: _onExit, onHealth,
@@ -148,6 +151,7 @@ export async function startSshTunnel({ binary = 'ssh', target, configPath, origi
   let backoff = 1000;
   let stopPromise;
   let health;
+  let lastHealthyAt = null;
   const owned = new Set();
   let resolveReady;
   let rejectReady;
@@ -155,7 +159,7 @@ export async function startSshTunnel({ binary = 'ssh', target, configPath, origi
 
   const getHealth = () => health && { ...health, ...(health.error ? { error: { ...health.error } } : {}) };
   function report(status, error, retryAt) {
-    health = { status, checkedAt: Date.now(),
+    health = { status, checkedAt: Date.now(), lastHealthyAt,
       ...(error ? { error: { code: error.code, message: messages[error.code] || messages.SSH_EXITED } } : {}),
       ...(retryAt !== undefined ? { retryAt } : {}) };
     try { onHealth?.(getHealth()); } catch { /* Observers do not own transport cleanup. */ }
@@ -253,6 +257,10 @@ export async function startSshTunnel({ binary = 'ssh', target, configPath, origi
         if (!result || result.ok !== true || result.service !== 'dsh-remote-control') throw failure('SSH_HEALTH_INVALID');
         if (result.entryId !== expectedEntryId) throw failure('SSH_HEALTH_ENTRY_MISMATCH');
         clearTimeout(attempt.timer);
+        attempt.verified = true;
+        attempt.healthFailures = 0;
+        attempt.degraded = false;
+        lastHealthyAt = Date.now();
         backoff = 1000;
         report('online');
         if (stopping || attempt.closing || !attempt.alive) return;
@@ -268,7 +276,16 @@ export async function startSshTunnel({ binary = 'ssh', target, configPath, origi
         const safeError = error instanceof RemoteControlError && messages[error.code]
           ? error : failure('SSH_HEALTH_UNREACHABLE');
         if (!ready) { report('reconnecting', safeError); poll(attempt, STARTUP_POLL_INTERVAL); }
-        else queueMicrotask(() => { void lost(attempt, safeError); });
+        else {
+          attempt.healthFailures++;
+          if (attempt.healthFailures >= HEALTH_FAILURE_THRESHOLD
+            || ['SSH_HEALTH_ENTRY_MISMATCH', 'SSH_HEALTH_INVALID'].includes(safeError.code)) {
+            attempt.degraded = true;
+          }
+          // Public DNS, TLS, or HTTP trouble is not evidence that the SSH transport failed.
+          report(attempt.degraded ? 'degraded' : attempt.verified ? 'online' : 'reconnecting', safeError);
+          poll(attempt, HEALTH_INTERVAL);
+        }
       } finally {
         clearTimeout(probeTimeout);
         controller.signal.removeEventListener('abort', cancel);
@@ -283,6 +300,7 @@ export async function startSshTunnel({ binary = 'ssh', target, configPath, origi
     let acquired;
     let joined;
     const attempt = { alive: true, closed: false, forwarded: false, closing: false,
+      verified: false, healthFailures: 0, degraded: false,
       acquired: new Promise(resolve => { acquired = resolve; }),
       joined: new Promise(resolve => { joined = resolve; }) };
     current = attempt;
@@ -311,6 +329,8 @@ export async function startSshTunnel({ binary = 'ssh', target, configPath, origi
         if (stopping || attempt.closing || current !== attempt || !attempt.alive) return;
         if (result === 'forwarded') {
           attempt.forwarded = true;
+          // First startup still needs public health; later deadlines cover missing ACKs only.
+          if (ready) clearTimeout(attempt.timer);
           queueMicrotask(() => check(attempt));
         } else {
           attempt.failure = failure(result);
@@ -320,7 +340,9 @@ export async function startSshTunnel({ binary = 'ssh', target, configPath, origi
       attempt.child.stderr?.setEncoding('utf8');
       attempt.child.stderr?.on('data', attempt.readDiagnostic);
       if (ready && !stopping && !attempt.closing) {
-        attempt.timer = setTimeout(() => { void lost(attempt, failure('SSH_TIMEOUT')); }, timeoutMs);
+        attempt.timer = setTimeout(() => {
+          if (!attempt.forwarded) void lost(attempt, failure('SSH_TIMEOUT'));
+        }, timeoutMs);
         attempt.timer.unref?.();
       }
     } catch (error) {
