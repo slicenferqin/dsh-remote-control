@@ -1,38 +1,46 @@
 # dsh-remote-control
 
-[简体中文](README.zh-CN.md)
+简体中文 | [English](README.en.md)
 
-Pair a phone browser with your running [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness) through a temporary Cloudflare HTTPS tunnel. Continue the same sessions, send messages, answer questions, approve actions, and stop tasks from your phone. No phone app, Cloudflare account, or custom domain is required.
+通过临时 Cloudflare HTTPS 隧道，将手机浏览器配对到正在运行的 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai/deepseek-harness)。在手机上继续同一批会话、发送消息、回答问题、审批操作或停止任务。无需手机客户端、Cloudflare 账号或自备域名。
 
-This is an independent community plugin. For the current full phone experience, also install [dsh-mobile](https://github.com/slicenferqin/dsh-mobile), which adds a task-first phone workspace. Either plugin can be installed independently.
+这是独立维护的社区插件。当前完整手机体验建议同时安装 [dsh-mobile](https://github.com/slicenferqin/dsh-mobile)，获得以任务为中心的手机工作台。两个插件也可以分别独立安装。
 
-## Connection flow
+## 宣传片
+
+https://github.com/user-attachments/assets/763e9698-6479-40da-9685-b201a600c2e4
+
+[下载完整 MP4](https://github.com/slicenferqin/dsh-remote-control/releases/download/v0.2.1/DSH-Anywhere-30s.mp4) · [GIF 预览](https://github.com/slicenferqin/dsh-remote-control/releases/download/v0.2.1/DSH-Anywhere-preview.gif) · [封面](https://github.com/slicenferqin/dsh-remote-control/releases/download/v0.2.1/DSH-Anywhere-cover.png)
+
+30 秒宣传片，16:9、1080p 60 fps，使用原创音乐与音效，中文画面，无口播。
+
+## 连接方式
 
 ```mermaid
 flowchart LR
-  Phone["Phone / tablet browser"] -->|HTTPS| Tunnel["Cloudflare Quick Tunnel"]
-  Tunnel --> Bridge["Loopback pairing proxy"]
-  Bridge --> DSH["Existing DSH Web Host"]
+  Phone["手机 / 平板浏览器"] -->|HTTPS| Tunnel["Cloudflare 临时隧道"]
+  Tunnel --> Bridge["本机回环配对代理"]
+  Bridge --> DSH["已有 DSH Web Host"]
 ```
 
-## Features
+## 功能
 
-- Explicit local switch to start or stop remote access; starts switched off.
-- Short-lived, single-use pairing QR codes, with device-name confirmation before pairing.
-- Multiple paired devices: four by default, configurable up to sixteen; rename or revoke each device separately.
-- HTTP and WebSocket access to the existing DSH Host, with automatic credential renewal.
-- A `remote_control` agent tool for status, renaming, revocation, and disconnecting all devices. Enabling access and issuing pairing codes stay in local Settings.
+- 在本机显式开启或关闭远程入口；插件始终以关闭状态启动。
+- 短时、一次性配对二维码，确认设备名后才提交配对。
+- 默认支持四台配对设备，可配置到十六台；可逐台重命名和撤销。
+- 通过 HTTP / WebSocket 访问现有 DSH Host，并自动续期凭证。
+- `remote_control` agent 工具可查看状态、重命名、撤销设备或断开所有设备；开启入口和签发配对码仍在本机设置中操作。
 
-## Compatibility
+## 兼容性
 
-- Node.js **22.19 or later**, DSH installed, and `pnpm` on `PATH` for profile package management.
-- Declared DSH range: `>=0.2.1-rc.2 <0.3.0`. DSH plugin APIs are pre-stable; check compatibility before upgrading.
-- Validated with a **DSH 0.2.1-rc.2 source build on macOS arm64**, including live browser/tunnel use. This is not an end-to-end validation claim for every OS, browser, or mobile network.
-- The DSH Web origin must use **`localhost`, `127.0.0.1`, or `[::1]`**. The default `dsh web` listener uses `127.0.0.1`. LAN addresses and wildcard binds such as `0.0.0.0` or `[::]` are unsupported by this bridge.
+- **Node.js 22.19 或更新版本**，已安装 DSH；profile 包管理需要 `PATH` 中有 `pnpm`。
+- 声明的 DSH 版本范围：`>=0.2.1-rc.2 <0.3.0`。DSH 插件 API 尚未稳定，升级前请核对兼容性。
+- 已在 **DSH 0.2.1-rc.2 源码构建版、macOS arm64** 上完成 live 浏览器和隧道验证；这不代表所有操作系统、浏览器和手机网络均经过端到端验证。
+- DSH Web origin 的主机名必须是 **`localhost`、`127.0.0.1` 或 `[::1]`**。默认 `dsh web` 监听 `127.0.0.1`。桥接不支持 LAN 地址或 `0.0.0.0`、`[::]` 等通配绑定。
 
-## Install and start
+## 安装与启动
 
-Install `cloudflared` yourself on the computer running DSH:
+请自行在运行 DSH 的电脑上安装 `cloudflared`：
 
 ```sh
 # macOS
@@ -44,79 +52,79 @@ brew install cloudflared
 winget install Cloudflare.cloudflared
 ```
 
-For other platforms, use the [official cloudflared releases](https://github.com/cloudflare/cloudflared/releases). Put the executable on `PATH`, or set `cloudflaredPath` in the plugin configuration.
+其他平台使用 [cloudflared 官方发行版](https://github.com/cloudflare/cloudflared/releases)。将可执行文件加入 `PATH`，或在插件配置中设置 `cloudflaredPath`。
 
-Install the tagged community release into the Web profile:
+通过 GitHub tag 将社区发行版安装到 Web profile：
 
 ```sh
 dsh plugin --profile web add github:slicenferqin/dsh-remote-control#v0.2.1
 ```
 
-For the full phone experience, optionally add the phone workspace to the same profile:
+如需完整手机体验，可在同一 profile 加装手机工作台：
 
 ```sh
 dsh plugin --profile web add github:slicenferqin/dsh-mobile#v0.1.0
 ```
 
-Start DSH with `dsh web` (or `dsh --profile web`). If it is already running, restart that profile after the CLI installation, then refresh the local page. Open the authenticated local browser page printed by DSH. Release tarballs are also available from [GitHub Releases](https://github.com/slicenferqin/dsh-remote-control/releases); npm publication is not required.
+使用 `dsh web`（或 `dsh --profile web`）启动。若 DSH 已运行，CLI 安装后请重启该 profile，再刷新本机页面。打开 DSH 输出的已认证本机浏览器入口。[GitHub Releases](https://github.com/slicenferqin/dsh-remote-control/releases) 也提供发行压缩包，无需发布到 npm。
 
-## Pair and use
+## 配对与使用
 
-1. On the computer, open **Settings → Remote control** and enable remote access.
-2. Wait for the Quick Tunnel and QR code. First startup can take nearly a minute, depending on the network. Quick Tunnels have temporary domains, with no stable hostname.
-3. Scan the QR code with the phone camera and open the pairing page in a browser.
-4. **Fill in or confirm the device name, then tap “配对并进入” (Pair and enter).** The page does not submit automatically. Invalid names do not consume the pairing code.
-5. Use the existing DSH sessions from the phone. Browsers share one Host and its records, while each browser can select a different session.
-6. Rename or revoke devices in the computer's Remote control settings. With dsh-mobile installed, a paired phone can also rename itself under **Device**.
+1. 在电脑打开 **设置 → 远程控制**，开启远程入口。
+2. 等待 Quick Tunnel 建立并出现二维码。首次启动可能接近一分钟，取决于网络；临时隧道没有稳定域名。
+3. 手机相机扫码，在浏览器打开配对页。
+4. **填写或确认设备名称，再点击「配对并进入」。** 页面不会自动提交；无效名称不会消耗配对码。
+5. 手机进入现有 DSH 会话。不同浏览器共享同一 Host 及记录，但可以各自选择不同会话。
+6. 在电脑的远程控制设置中重命名或撤销设备。安装 dsh-mobile 后，已配对手机也可在 **设备** 中修改自己的名称。
 
-The computer must stay awake, online, and running DSH. Generate a new QR code for each additional device. Pairing links last two minutes by default and can be claimed once; generating a new code invalidates the previous unclaimed one.
+电脑需要保持唤醒、联网并持续运行 DSH。每增加一台设备请生成新二维码。配对链接默认两分钟有效，只能领取一次；生成新码会使未领取的旧码失效。
 
-## Add a workspace
+## 添加工作区
 
-In the desktop interface, **Add workspace** (`AddWorkspace`) opens a directory chooser in the browser where you clicked it. The chooser browses directories on the computer running the DSH Host. A remote browser therefore selects a Host directory from its own page.
+在桌面界面点击 **添加工作区**（`AddWorkspace`），目录选择器会出现在发起操作的当前浏览器中。它浏览的是运行 DSH Host 的电脑上的目录；远程浏览器也可在自己的页面中选择 Host 目录。
 
-While the dsh-remote-control bundle is enabled in a profile, local browsers in that profile also use the browser chooser, including when the remote-access switch is off. This is a profile-wide setting, independent of when the tunnel starts. Core's automatic picker chooses its backend at startup from local conditions; starting a tunnel later does not change that choice.
+只要该 profile 中启用了 dsh-remote-control bundle，本机浏览器也使用浏览器目录选择器，即使远程入口开关处于关闭状态。这是整个 profile 的设置，不取决于隧道何时启动。Core 的自动选择器会在启动时根据本机条件选定 backend，之后开启隧道不会改变该选择。
 
-The bundle patch relies on the standard Web profile's default `directory-picker` row: it disables that automatic picker and explicitly adds Core's browse Host and browse Client. If you use a custom composition, ensure it has only one directory-picker backend active; remove or disable conflicting native, automatic, or duplicate browse backends.
+bundle patch 依赖标准 Web profile 默认的 `directory-picker` 行：禁用该自动选择器，并显式加入 Core 的 browse Host 和 browse Client。定制 composition 需要确保只启用一个目录选择 backend，移除或禁用冲突的原生、自动选择器或重复 browse backend。
 
-## Credentials and session lifetime
+## 凭证与有效期
 
-Access credentials last **8 hours** by default. A rotating refresh credential has a **rolling 10-day** lifetime, reset after each successful refresh. The browser normally renews access **5 minutes before expiry**, and can transparently recover after a background pause or a fresh page/browser startup while its refresh credential remains valid.
+访问凭证默认有效 **8 小时**。刷新凭证采用**滚动 10 天**有效期，每次成功刷新重新计时。浏览器通常在访问凭证到期前 **5 分钟**续期；只要刷新凭证仍有效，手机从后台恢复、重新打开页面或浏览器冷启动时也可透明续期。
 
-**The rolling window applies only while the same remote entry remains running and the device has not been revoked.** Turning remote access off, restarting DSH, reloading/unloading the Host plugin, or creating an entry with a new tunnel domain clears that run's pairings. Pair again afterward; credentials do not survive these events. An ordinary browser-page refresh does not itself restart the Host plugin.
+**滚动窗口只适用于同一远程入口持续运行、且设备未被撤销的情况。** 关闭远程控制、重启 DSH、重载或卸载 Host 插件，或建立新域名的隧道入口，都会清空本轮配对，之后需要重新扫码。凭证不跨这些事件保留；普通浏览器页面刷新本身不会重启 Host 插件。
 
-Revocation invalidates both credentials and closes that device's connections. Turning off remote access closes the bridge, tunnel, and all remote connections. Automatic renewal cannot reopen a disabled entry.
+撤销设备会作废它的两种凭证并关闭连接。关闭远程入口会关闭桥接、隧道及全部远程连接。自动续期不能重新打开已关闭的入口。
 
-## Configuration
+## 配置
 
-Edit the plugin's configuration in DSH's plugin settings. Defaults and supported ranges:
+在 DSH 插件设置中编辑配置，字段及范围如下：
 
-| Field | Default | Purpose / range |
+| 字段 | 默认值 | 含义及范围 |
 | --- | --- | --- |
-| `cloudflaredPath` | `cloudflared` | Executable name or absolute path on the DSH computer. |
-| `tunnelProtocol` | `http2` | `http2`, `quic`, or `auto`; HTTP/2 avoids depending on outbound UDP. |
-| `startupTimeoutSeconds` | `60` | Tunnel startup timeout, 10–180 seconds. |
-| `pairingTtlSeconds` | `120` | Single-use pairing lifetime, 30–600 seconds. |
-| `deviceTtlHours` | `8` | Access credential lifetime, 1–168 hours. |
-| `refreshTtlDays` | `10` | Rolling refresh lifetime, 1–90 days; must exceed the access lifetime. |
-| `refreshAheadSeconds` | `300` | Renew this early, 30–3600 seconds; must be shorter than the access lifetime. |
-| `refreshRetrySeconds` | `30` | Retry delay after temporary renewal failure, 5–60 seconds. |
-| `maxDevices` | `4` | Maximum paired devices, 1–16. |
-| `heartbeatSeconds` | `15` | Keepalive for the local management status stream, 5–60 seconds. |
+| `cloudflaredPath` | `cloudflared` | DSH 电脑上的可执行文件名或绝对路径。 |
+| `tunnelProtocol` | `http2` | `http2` / `quic` / `auto`；HTTP/2 不依赖出站 UDP。 |
+| `startupTimeoutSeconds` | `60` | 隧道启动超时，10–180 秒。 |
+| `pairingTtlSeconds` | `120` | 一次性配对码有效期，30–600 秒。 |
+| `deviceTtlHours` | `8` | 访问凭证有效期，1–168 小时。 |
+| `refreshTtlDays` | `10` | 滚动刷新有效期，1–90 天；必须长于访问凭证寿命。 |
+| `refreshAheadSeconds` | `300` | 提前续期时间，30–3600 秒；必须短于访问凭证寿命。 |
+| `refreshRetrySeconds` | `30` | 临时续期失败后的重试间隔，5–60 秒。 |
+| `maxDevices` | `4` | 配对设备上限，1–16。 |
+| `heartbeatSeconds` | `15` | 本机管理页状态流的保活间隔，5–60 秒。 |
 
-The plugin uses its own empty cloudflared configuration and a loopback bridge; it does not edit your existing Cloudflare configuration. No change to DSH's default listener or trust list is needed. If a custom listener causes `LOOPBACK_REQUIRED`, restart DSH with `dsh web --host 127.0.0.1` (or `--host ::1`).
+插件使用独立的空 cloudflared 配置和 loopback 桥接，不修改已有 Cloudflare 配置，也不需要改变 DSH 默认监听或信任列表。如果自定义监听触发 `LOOPBACK_REQUIRED`，请用 `dsh web --host 127.0.0.1`（或 `--host ::1`）重启 DSH。
 
-## Security scope and limits
+## 安全范围与限制
 
-**A paired device receives owner access to this DSH Host, including available local-file and command capabilities, subject to the Host's permission policy.** Pair only browsers you trust. There is no read-only role or exclusive control lock, and pairing does not lock the computer. This operates DSH sessions; it is not OS screen sharing or general desktop control.
+**已配对设备具有该 DSH Host 的 owner 权限，包括 Host 权限策略允许的本机文件及命令能力。** 只配对可信浏览器。本版没有只读角色或排他控制锁，配对也不会锁定电脑。这是 DSH 会话操作界面，不是操作系统投屏或通用远程桌面。
 
-Pairing secrets are kept in URL fragments and claimed through a same-origin POST, so opening a link preview does not consume a code. The DSH launch token is not sent to the phone or placed in the QR code or logs. Per-device access and refresh cookies use **HttpOnly, Secure, and SameSite=Strict**; client JavaScript does not read their values. The bridge also uses DSH authentication and validates external Host/Origin headers. Local authenticated Settings alone expose the enable/pair management endpoints; those endpoints are blocked through the remote proxy.
+配对凭证放在 URL fragment 中，通过同源 POST 领取，链接预览不会消耗配对码。DSH 启动 token 不发送到手机，也不写入二维码或日志。每台设备的访问和刷新 cookie 均使用 **HttpOnly、Secure、SameSite=Strict**，客户端 JavaScript 不读取凭证值。桥接同时使用 DSH 自带认证并校验外部 Host / Origin。开启入口和签发配对码的管理接口仅向本机已认证设置页开放，远程代理会阻断这些接口。
 
-Cloudflare carries the external HTTPS traffic. Availability depends on Cloudflare, local connectivity, and the phone's network. Quick Tunnels do not provide a stable domain or a persistent remote-access service. This release does not support LAN targets, wildcard listeners, custom domains, or named tunnels.
+外部 HTTPS 流量经过 Cloudflare。可用性取决于 Cloudflare、电脑连接及手机网络；Quick Tunnel 不提供稳定域名或持久远程访问服务。本版不支持 LAN 目标、通配监听、自定义域名或命名隧道。
 
-## Development and tests
+## 开发与测试
 
-Source, build scripts, and tests are included so the client bundle can be rebuilt. From a checkout or extracted source package:
+包中附带源码、构建脚本和测试，可重建客户端产物。在仓库根目录或解压后的源码包中执行：
 
 ```sh
 pnpm install --ignore-scripts
@@ -125,8 +133,8 @@ pnpm run check
 pnpm test
 ```
 
-The behavior tests cover pairing and expiry, origin checks, HTTP/WebSocket forwarding, credential renewal, revocation, startup cancellation, and cleanup. They do not replace testing the actual phone/network combination. For local development, install the checkout with `dsh plugin --profile web add .` from this repository's root, then restart the Web profile and refresh its page.
+行为测试覆盖配对与过期、来源校验、HTTP / WebSocket 转发、凭证续期、撤销、启动取消和资源清理；实际手机和网络组合仍需自行验证。本地开发可在仓库根目录运行 `dsh plugin --profile web add .` 安装 checkout，然后重启 Web profile 并刷新页面。
 
-## License
+## 许可证
 
-[MIT](LICENSE).
+[MIT](LICENSE)。

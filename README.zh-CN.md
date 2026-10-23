@@ -1,10 +1,18 @@
 # dsh-remote-control
 
-[English](README.md)
+简体中文 | [English](README.en.md)
 
 通过临时 Cloudflare HTTPS 隧道，将手机浏览器配对到正在运行的 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai/deepseek-harness)。在手机上继续同一批会话、发送消息、回答问题、审批操作或停止任务。无需手机客户端、Cloudflare 账号或自备域名。
 
 这是独立维护的社区插件。当前完整手机体验建议同时安装 [dsh-mobile](https://github.com/slicenferqin/dsh-mobile)，获得以任务为中心的手机工作台。两个插件也可以分别独立安装。
+
+## 宣传片
+
+https://github.com/user-attachments/assets/763e9698-6479-40da-9685-b201a600c2e4
+
+[下载完整 MP4](https://github.com/slicenferqin/dsh-remote-control/releases/download/v0.2.1/DSH-Anywhere-30s.mp4) · [GIF 预览](https://github.com/slicenferqin/dsh-remote-control/releases/download/v0.2.1/DSH-Anywhere-preview.gif) · [封面](https://github.com/slicenferqin/dsh-remote-control/releases/download/v0.2.1/DSH-Anywhere-cover.png)
+
+30 秒宣传片，16:9、1080p 60 fps，使用原创音乐与音效，中文画面，无口播。
 
 ## 连接方式
 

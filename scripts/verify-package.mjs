@@ -32,7 +32,7 @@ assert.equal(pack.version, manifest.version);
 const packed = new Set(pack.files.map(file => file.path));
 const required = [
   'package.json', 'index.js', 'client.js', 'cordis.patch.yml', 'icon.svg',
-  'locale/en.json', 'locale/zh.json', 'README.md', 'README.zh-CN.md', 'LICENSE',
+  'locale/en.json', 'locale/zh.json', 'README.md', 'README.en.md', 'README.zh-CN.md', 'LICENSE',
   'scripts/verify-package.mjs', ...sources[manifest.name],
 ];
 async function requireDirectory(relative) {
