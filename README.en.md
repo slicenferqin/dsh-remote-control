@@ -196,6 +196,10 @@ pnpm test
 
 Behavior tests cover pairing, expiry, exact origin checks, HTTP/WebSocket forwarding, refresh rotation, persistent grant restoration/revocation, public health, SSH cancellation/reconnection, and client health-marker gating. Test your actual phone, certificate, and network combination as well. For local development, install the checkout with `dsh plugin --profile web add .` from this repository's root, then restart the Web profile and refresh its page.
 
+## Community
+
+Community link: [LINUX DO](https://linux.do/).
+
 ## License
 
 [MIT](LICENSE).

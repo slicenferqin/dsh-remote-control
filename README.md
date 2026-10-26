@@ -196,6 +196,10 @@ pnpm test
 
 行为测试覆盖配对、过期、精确来源校验、HTTP / WebSocket 转发、刷新轮换、持久授权恢复及撤销、健康探测、SSH 取消与重连，以及客户端 health 标记验证。实际手机、证书和网络组合仍需自行验证。本地开发可在仓库根目录运行 `dsh plugin --profile web add .` 安装 checkout，然后重启 Web profile 并刷新页面。
 
+## 社区交流
+
+社区友链：[LINUX DO](https://linux.do/)。
+
 ## 许可证
 
 [MIT](LICENSE)。
